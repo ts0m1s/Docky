@@ -13,6 +13,7 @@ def show_usage():
     cmds = [
         ("status", "Show Docker projects, containers, and system metrics"),
         ("projects", "List every project Docky found and where it lives"),
+        ("urls [name] [--check]", "Show where each service is reachable; --check tests every URL"),
         ("top", "Show real-time CPU and RAM usage mapped to your projects"),
         ("updates", "Check for available image updates"),
         ("upgrade [name] [--dry-run]", "Pull and recreate outdated containers (all, or one project)"),
@@ -52,6 +53,10 @@ def main():
             return show_usage()
         if cmd == "status": commands.cmd_status()
         elif cmd == "projects": commands.cmd_projects()
+        elif cmd == "urls":
+            args = sys.argv[2:]
+            target = next((a for a in args if not a.startswith("-")), None)
+            commands.cmd_urls(target=target, check="--check" in args)
         elif cmd == "top": commands.cmd_top()
         elif cmd in ("updates", "update"): commands.cmd_updates(is_upgrade=False)
         elif cmd == "upgrade":
