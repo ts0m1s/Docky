@@ -26,6 +26,31 @@ Once a day, after a command finishes, Docky prints a one-line notice when a newe
 
 Installs from before self-update existed don't record their version. Run the install command once more, and `docky self-update` works from then on. To follow a different branch, install with `DOCKY_REF=<branch>`; self-update keeps following it.
 
+### Versions and channels
+
+Docky has version numbers (`docky --version` → `docky 0.2.0 (a3b20d8, …)`), and every published version is a [GitHub release](https://github.com/ts0m1s/Docky/releases) with notes.
+
+- **main** (default): every change as soon as it's merged.
+- **stable**: only published releases. Install with `DOCKY_REF=stable`:
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/ts0m1s/Docky/main/install.sh | DOCKY_REF=stable sh
+  ```
+
+  On this channel the daily notice reads `Docky 0.3.0 is available (you have 0.2.0)`, and `self-update` links to the release notes. Pre-releases (`v0.3.0-rc.1`) are never offered.
+
+### Publishing a release (maintainers)
+
+1. In a PR, bump `__version__` in `about.py` (`0.2.0` → `0.3.0` for new features, `0.2.1` for fixes only), then merge it.
+2. Tag the merge and push the tag:
+
+   ```sh
+   git checkout main && git pull
+   git tag v0.3.0 && git push origin v0.3.0
+   ```
+
+3. The release workflow checks that every module compiles and the tag matches `about.py`, then publishes the release with notes generated from the merged PRs. Tag `v0.3.0-rc.1` to publish a pre-release for testing first.
+
 ## Usage
 
 ```

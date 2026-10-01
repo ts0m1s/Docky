@@ -5,7 +5,8 @@
 # Once installed, update with `docky self-update`; no need to run this again.
 #
 # Environment overrides:
-#   DOCKY_REF      git branch or tag to install and follow (default: main)
+#   DOCKY_REF      what to install and follow (default: main): a branch, a tag,
+#                  or "stable" for the latest published release
 #   DOCKY_REPO     GitHub repo to install from (default: ts0m1s/Docky)
 #   DOCKY_HOME     where the files go (default: ~/.local/share/docky)
 #   DOCKY_BIN_DIR  where the `docky` command is linked
@@ -46,16 +47,24 @@ command -v docker >/dev/null 2>&1 || warn "Docker was not found in PATH. Docky n
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# "stable" follows releases: resolve it to the newest release's tag.
+TARGET="$REF"
+if [ "$REF" = "stable" ]; then
+  TARGET="$(fetch "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+    | sed -n 's/^  "tag_name": "\([^"]*\)".*/\1/p' | head -n 1)"
+  [ -n "$TARGET" ] || die "No Docky release has been published yet. Install from main instead (leave DOCKY_REF unset)."
+fi
+
 # Pin the exact commit, so `docky self-update` knows what's installed.
-COMMIT_JSON="$(fetch "https://api.github.com/repos/$REPO/commits/$REF" 2>/dev/null || true)"
+COMMIT_JSON="$(fetch "https://api.github.com/repos/$REPO/commits/$TARGET" 2>/dev/null || true)"
 COMMIT="$(printf '%s\n' "$COMMIT_JSON" | sed -n 's/^  "sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
 DATE="$(printf '%s\n' "$COMMIT_JSON" | sed -n 's/.*"date": "\([0-9-]\{10\}\)T.*/\1/p' | tail -n 1)"
 if [ -z "$COMMIT" ]; then
   warn "Couldn't look up the exact commit (GitHub API unreachable?); 'docky self-update' will reinstall to be sure."
 fi
 
-say "Downloading Docky ($REF${COMMIT:+ @ $(printf %.7s "$COMMIT")})..."
-fetch "https://codeload.github.com/$REPO/tar.gz/${COMMIT:-$REF}" | tar -xz -C "$TMP" \
+say "Downloading Docky ($TARGET${COMMIT:+ @ $(printf %.7s "$COMMIT")})..."
+fetch "https://codeload.github.com/$REPO/tar.gz/${COMMIT:-$TARGET}" | tar -xz -C "$TMP" \
   || die "Download failed. Is the repository public and the ref '$REF' valid?"
 
 SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
@@ -82,7 +91,8 @@ cat > "$INSTALL_DIR/VERSION" <<EOF
 EOF
 ln -sf "$INSTALL_DIR/docky.py" "$BIN_DIR/docky"
 
-say "Installed: $BIN_DIR/docky"
+VERSION_NUMBER="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "$INSTALL_DIR/about.py" 2>/dev/null || true)"
+say "Installed Docky${VERSION_NUMBER:+ $VERSION_NUMBER}: $BIN_DIR/docky"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

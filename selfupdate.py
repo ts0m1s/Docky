@@ -11,6 +11,7 @@ installs anything on its own.
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -23,6 +24,7 @@ from pathlib import Path
 
 DEFAULT_REPO = "ts0m1s/Docky"
 DEFAULT_REF = "main"
+STABLE = "stable"  # special ref: follow the latest published release instead of a branch
 INSTALL_DIR = Path(__file__).resolve().parent
 VERSION_FILE = INSTALL_DIR / "VERSION"
 CHECK_INTERVAL = 24 * 3600
@@ -52,6 +54,20 @@ def repo_and_ref():
 def is_git_checkout():
     return (INSTALL_DIR / ".git").exists()
 
+def local_version():
+    """The version number of the code that's running (about.__version__), or None."""
+    try:
+        import about
+        return about.__version__
+    except (ImportError, AttributeError):
+        return None
+
+def label(version, commit):
+    """'0.2.0 (a3b20d8)', or just the short commit when there's no version number."""
+    if version and commit:
+        return f"{version} ({_short(commit)})"
+    return version or _short(commit)
+
 # --- GitHub --------------------------------------------------------------
 
 def _get(url, timeout):
@@ -71,13 +87,38 @@ def _get(url, timeout):
     except (urllib.error.URLError, OSError) as e:
         raise UpdateError(f"can't reach GitHub ({getattr(e, 'reason', e)})")
 
+def remote_version(repo, commit, timeout=10):
+    """__version__ from about.py at that commit; None for commits from before versions existed."""
+    try:
+        source = _get(f"https://raw.githubusercontent.com/{repo}/{commit}/about.py", timeout).decode("utf-8", "replace")
+    except UpdateError:
+        return None
+    match = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", source, re.M)
+    return match.group(1) if match else None
+
 def latest(repo, ref, timeout=10):
-    """{"commit", "date", "message"} for the newest commit on ref."""
-    data = json.loads(_get(f"https://api.github.com/repos/{repo}/commits/{ref}", timeout))
+    """
+    {"commit", "date", "message", "version", "tag"} for what `ref` points to now.
+    ref "stable" means the newest published release (pre-releases excluded);
+    anything else is a branch or tag.
+    """
+    tag = None
+    if ref == STABLE:
+        try:
+            release = json.loads(_get(f"https://api.github.com/repos/{repo}/releases/latest", timeout))
+        except UpdateError as e:
+            if "not found" in str(e):
+                raise UpdateError("no release has been published yet (install with DOCKY_REF=main to follow main)")
+            raise
+        tag = release["tag_name"]
+    data = json.loads(_get(f"https://api.github.com/repos/{repo}/commits/{tag or ref}", timeout))
+    commit = data["sha"]
     return {
-        "commit": data["sha"],
+        "commit": commit,
         "date": data["commit"]["committer"]["date"][:10],
         "message": data["commit"]["message"].splitlines()[0],
+        "version": tag.lstrip("v") if tag else remote_version(repo, commit, timeout),
+        "tag": tag,
     }
 
 def changes_between(repo, old, new, timeout=10):
@@ -193,6 +234,7 @@ class BackgroundCheck:
     """
     def __init__(self):
         self.latest_commit = None
+        self.latest_version = None
         self.thread = None
         if not _notice_enabled():
             return
@@ -203,20 +245,22 @@ class BackgroundCheck:
         repo, ref = repo_and_ref()
         if cache.get("ref") == f"{repo}@{ref}" and time.time() - cache.get("checked_at", 0) < CHECK_INTERVAL:
             self.latest_commit = cache.get("latest")
+            self.latest_version = cache.get("version")
             return
         self.thread = threading.Thread(target=self._run, args=(repo, ref), daemon=True)
         self.thread.start()
 
     def _run(self, repo, ref):
         try:
-            commit = latest(repo, ref, timeout=2)["commit"]
+            target = latest(repo, ref, timeout=2)
         except (UpdateError, KeyError, ValueError):
             return
-        self.latest_commit = commit
+        self.latest_commit, self.latest_version = target["commit"], target["version"]
         try:
             path = _state_file()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"ref": f"{repo}@{ref}", "latest": commit, "checked_at": time.time()}))
+            path.write_text(json.dumps({"ref": f"{repo}@{ref}", "latest": target["commit"],
+                                        "version": target["version"], "checked_at": time.time()}))
         except OSError:
             pass
 
@@ -225,9 +269,12 @@ class BackgroundCheck:
         if self.thread:
             self.thread.join(timeout=wait)
         info = installed()
-        if self.latest_commit and info and self.latest_commit != info["commit"]:
-            return "A new version of Docky is available. Run: docky self-update"
-        return None
+        if not (self.latest_commit and info and self.latest_commit != info["commit"]):
+            return None
+        mine, theirs = local_version(), self.latest_version
+        if theirs and mine and theirs != mine:
+            return f"Docky {theirs} is available (you have {mine}). Run: docky self-update"
+        return "A newer build of Docky is available. Run: docky self-update"
 
 # --- Commands ------------------------------------------------------------
 
@@ -236,12 +283,14 @@ def _short(commit):
 
 def cmd_version():
     info = installed()
+    version = local_version() or "unknown"
     if info:
-        print(f"docky {_short(info['commit'])} ({info.get('date') or 'unknown date'}, {info.get('repo')}@{info.get('ref')})")
+        channel = "latest release" if info.get("ref") == STABLE else f"branch {info.get('ref')}"
+        print(f"docky {version} ({_short(info['commit'])}, {info.get('date') or 'unknown date'}, following {channel} of {info.get('repo')})")
     elif is_git_checkout():
-        print(f"docky (running from a git checkout: {INSTALL_DIR})")
+        print(f"docky {version} (running from a git checkout: {INSTALL_DIR})")
     else:
-        print("docky (version unknown: installed before self-update existed; reinstall once to enable it)")
+        print(f"docky {version} (installed before self-update existed; reinstall once to enable it)")
 
 def cmd_self_update(check_only=False):
     from utils import Colors, color
@@ -257,9 +306,11 @@ def cmd_self_update(check_only=False):
         print(f"{color('✕', Colors.RED)} {color(f'Could not check for updates: {e}', Colors.RED)}\n")
         sys.exit(1)
 
-    here = f"{_short(current['commit'])} ({current.get('date') or '?'})" if current else "unknown (installed before self-update existed)"
+    mine = local_version()
+    here = f"{label(mine, current['commit'])}  {current.get('date') or ''}" if current else "unknown (installed before self-update existed)"
+    source = f"{repo}, latest release" if ref == STABLE else f"{repo}@{ref}"
     print(f"  installed  {here}")
-    print(f"  latest     {_short(target['commit'])} ({target['date']})  {color(f'{repo}@{ref}', Colors.DIM)}\n")
+    print(f"  latest     {label(target['version'], target['commit'])}  {target['date']}  {color(source, Colors.DIM)}\n")
 
     if current and current["commit"] == target["commit"]:
         return print(f"{color('✓', Colors.GREEN)} Docky is up to date.\n")
@@ -273,6 +324,8 @@ def cmd_self_update(check_only=False):
             if len(changes) > 15:
                 print(color(f"    … and {len(changes) - 15} more", Colors.DIM))
             print()
+    if target.get("tag"):
+        print(color(f"  Release notes: https://github.com/{repo}/releases/tag/{target['tag']}", Colors.DIM) + "\n")
 
     if check_only:
         return print(color("Run 'docky self-update' to install it.", Colors.DIM) + "\n")
@@ -288,4 +341,4 @@ def cmd_self_update(check_only=False):
         _state_file().unlink()  # the cached "new version" answer is now stale
     except OSError:
         pass
-    print(f"{color('✓', Colors.GREEN)} Updated to {_short(target['commit'])}. Run 'docky help' to see what's new.\n")
+    print(f"{color('✓', Colors.GREEN)} Updated to {label(target['version'], target['commit'])}. Run 'docky help' to see what's new.\n")
