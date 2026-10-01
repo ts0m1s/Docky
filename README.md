@@ -35,6 +35,7 @@ docky <command> [target]
 | Command | Description |
 | --- | --- |
 | `projects` | List every project Docky found, where it lives, and the compose files it uses |
+| `urls [name] [--check]` | Show where each service is reachable: domains from Traefik, LAN and Tailscale addresses from published ports. `--check` tests every URL |
 | `status` | Show Docker projects, containers, and system metrics. Flags containers whose shared network (`network_mode: container:...`) points at a container that no longer exists |
 | `top` | Live CPU and RAM usage mapped to your projects |
 | `updates` | Check for available image updates, showing the version change (e.g. `4.0.20-ls325 → 4.0.20-ls326`) and a release-notes link |
@@ -59,6 +60,17 @@ Your stacks can live anywhere. Docky finds them in two ways:
 Run `docky projects` to see what was found and from where. Commands take a project name, or its folder path when two projects share a name (`docky restart /opt/stacks/app`).
 
 Docky runs Compose with the same files the project was started with, so `docker-compose.override.yml` and friends are kept. If a project's folder is moved or deleted while its containers still exist, `docky status` warns about it instead of guessing.
+
+## Finding your services' URLs
+
+`docky urls` lists where each container can be reached, using only what Docker already knows:
+
+- **Domains** come from Traefik router labels (`Host(...)`, including `PathPrefix`). A router with TLS or a `websecure` entrypoint is shown as `https://`.
+- **LAN and Tailscale addresses** come from published ports. A port bound to `0.0.0.0` is shown on the machine's LAN IP and its Tailscale name. A port bound to `127.0.0.1` is marked "this machine only".
+- **Containers sharing another's network** (`network_mode: service:gluetun`) are reached through that container. A Traefik router named after the service is shown under it, so qBittorrent's URL appears under qBittorrent, not under the VPN.
+- When Traefik labels name the web port, other published ports (such as a torrent port) are listed as "published", not as URLs.
+
+`docky urls --check` opens every URL and marks it ✓ or ✗ (doesn't resolve, refused, timed out, 5xx). A login page (401/403) counts as reachable. Use it to see which domains actually work from this machine; for example, a Cloudflare tunnel's DNS record may be missing.
 
 ## Version changes
 

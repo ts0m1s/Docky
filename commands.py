@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 from utils import Colors, color, run_command, get_system_metrics, parse_pct, render_bar
 import docker_api
+import urls as urls_api
 import versions
 
 def get_spinner(idx):
@@ -68,6 +69,93 @@ def cmd_projects():
         print(f"  {color('!', Colors.RED)} {color(name, Colors.CYAN + Colors.BOLD)} {project['path']}  {color('compose files missing', Colors.RED)}")
     roots = ", ".join(str(r) for r in docker_api.scan_roots())
     print(color(f"\n  Scanned folders: {roots}  (set DOCKY_ROOT to change)\n", Colors.DIM))
+
+def cmd_urls(target=None, check=False):
+    """Where each service can be reached: domains from Traefik, LAN and Tailscale addresses from published ports."""
+    print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color('  ·  Service URLs', Colors.DIM)}\n")
+    projects = docker_api.find_projects()
+    if target:
+        projects, error = select_projects(projects, target)
+        if error:
+            return print(f"{color('!', Colors.RED)} {color(error, Colors.RED)}\n")
+
+    all_containers = urls_api.inspect_all_containers()
+    hosts = urls_api.host_addresses()
+
+    groups = []
+    for project in projects:
+        name = project.get("project_name") or docker_api.sanitize_project_name(project["name"])
+        members = [c for c in all_containers.values() if c["project"] == name]
+        groups.append((project["name"], members))
+    if not target:
+        loose = [c for c in all_containers.values() if not c["project"]]
+        if loose:
+            groups.append(("(not in a Compose project)", loose))
+
+    rows = []
+    for title, members in groups:
+        entries = []
+        for c in sorted(members, key=lambda c: c["name"]):
+            entries.append((c, urls_api.service_urls(c, all_containers, hosts)))
+        rows.append((title, entries))
+
+    results = {}
+    if check:
+        wanted = [u["url"] for _, entries in rows for _, info in entries for u in info["urls"]]
+        sys.stdout.write(f"{color('⠋', Colors.CYAN)} {color(f'Checking {len(set(wanted))} URLs...', Colors.DIM)}\033[K")
+        sys.stdout.flush()
+        results = urls_api.check_urls(wanted)
+        sys.stdout.write("\r\033[K")
+
+    states = {}
+    ok, out, _ = run_command(["docker", "ps", "-a", "--format", "{{.Names}}|{{.State}}"])
+    for line in out.splitlines() if ok else []:
+        n, _, st = line.partition("|")
+        states[n] = st
+
+    width = max((len(c["name"]) for _, entries in rows for c, _ in entries), default=10) + 2
+    for p_idx, (title, entries) in enumerate(rows):
+        last_p = p_idx == len(rows) - 1
+        print(f"{'└─' if last_p else '├─'} {color(title, Colors.CYAN + Colors.BOLD)}")
+        indent = "   " if last_p else "│  "
+        if not entries:
+            print(f"{indent}└─ {color('no containers (not started)', Colors.DIM)}")
+            continue
+        for c_idx, (c, info) in enumerate(entries):
+            last_c = c_idx == len(entries) - 1
+            branch, cont = ("└─", "   ") if last_c else ("├─", "│  ")
+            stopped = states.get(c["name"], "running") != "running"
+            label = c["name"].ljust(width)
+            via = color(f"via {info['via']}", Colors.DIM) + "  " if info["via"] else ""
+            if not info["urls"]:
+                if info["via"]:
+                    why = "no URL of its own on that network"
+                elif info["other_ports"]:
+                    why = f"no web URL · published: {', '.join(info['other_ports'])}"
+                else:
+                    why = "internal only (no published port or Traefik route)"
+                print(f"{indent}{branch} {label}{via}{color(why, Colors.DIM)}")
+                continue
+            print(f"{indent}{branch} {label}{via}{color('(stopped)', Colors.YELLOW) if stopped else ''}".rstrip())
+            for u in info["urls"]:
+                mark = ""
+                if check:
+                    up, detail = results.get(u["url"], (False, "not checked"))
+                    mark = f"{color('✓', Colors.GREEN)} " if up else f"{color('✗', Colors.RED)} "
+                    tail = color(f"{u['kind']}  {detail if not up else ''}".rstrip(), Colors.DIM if up else Colors.RED)
+                else:
+                    tail = color(u["kind"], Colors.DIM)
+                print(f"{indent}{cont}   {mark}{u['url']:<46} {tail}")
+            if info["other_ports"]:
+                print(color(f"{indent}{cont}   also published: {', '.join(info['other_ports'])}", Colors.DIM))
+    print()
+    if not check:
+        print(color("  Domains come from Traefik labels; whether they resolve depends on your DNS/tunnel.", Colors.DIM))
+        print(color("  Run 'docky urls --check' to test every URL.\n", Colors.DIM))
+    else:
+        down = sum(1 for up, _ in results.values() if not up)
+        summary = f"{len(results) - down}/{len(results)} URLs reachable"
+        print(f"{color('●', Colors.GREEN if not down else Colors.YELLOW)} {color(summary, Colors.DIM)}\n")
 
 def print_stale(stale):
     if not stale:
