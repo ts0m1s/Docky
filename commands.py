@@ -8,6 +8,7 @@ from pathlib import Path
 from utils import Colors, color, run_command, get_system_metrics, parse_pct, render_bar
 import docker_api
 import urls as urls_api
+import versions
 
 def get_spinner(idx):
     chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -335,6 +336,15 @@ def cmd_top():
     print(color("  Monitor stopped.", Colors.DIM) + "\n")
 
 
+def check_image_with_version(image, allow_pull):
+    """check_image, plus what version the registry would give us when there's an update."""
+    res = docker_api.check_image(image, allow_pull)
+    if res["status"] == "update":
+        # A pull-based check already has the new image locally; otherwise
+        # read the registry's config without pulling.
+        res["remote_info"] = versions.local_version(image) if res.get("checked_via") == "pull" else versions.remote_version(image)
+    return res
+
 def cmd_updates(is_upgrade=False, target=None, dry_run=False):
     projects = docker_api.find_projects()
     if not projects:
@@ -356,11 +366,12 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
         if not project_data: return
 
         unique_images = {c["image"] for d in project_data for c in d["containers"]}
-        image_futures = {img: executor.submit(docker_api.check_image, img, is_upgrade and not dry_run) for img in unique_images}
+        image_futures = {img: executor.submit(check_image_with_version, img, is_upgrade and not dry_run) for img in unique_images}
 
         total_cur, total_upd, total_upg, total_err, total_unk = 0, 0, 0, 0, 0
         errors = []
         unstable = []
+        changes = []  # (name, "from → to", release notes url)
         dependency_maps = {}
 
         def dependency_map(project):
@@ -387,12 +398,21 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
 
                 res = future.result()
                 status = res["status"]
+                running_info = versions.local_version(container["running_id"] or container["image"])
+                target_info = res.get("remote_info")
                 if status == "current" and container["running_id"] and res.get("local_id"):
-                    if container["running_id"] != res["local_id"]: status = "update"
+                    if container["running_id"] != res["local_id"]:
+                        # Newer image already pulled, container not recreated yet.
+                        status = "update"
+                        target_info = versions.local_version(res["local_id"])
+                change = versions.describe_change(running_info, target_info) if status == "update" else None
+                change_text = f"  {color(change, Colors.DIM)}" if change else ""
 
                 if status == "current":
                     total_cur += 1
-                    print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color('up to date', Colors.DIM)}\033[K")
+                    current = versions.describe_current(running_info)
+                    detail = f"up to date · {current}" if current else "up to date"
+                    print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color(detail, Colors.DIM)}\033[K")
                 elif status == "unknown":
                     total_unk += 1
                     print(f"\r{prefix}{color('?', Colors.YELLOW)} {name:<20} {color('cannot verify without pulling', Colors.DIM)}\033[K")
@@ -433,12 +453,17 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                                 idx += 1; time.sleep(0.08)
                             ok, detail = verify_future.result()
 
+                            # What actually got installed, not what the check predicted.
+                            installed = versions.local_version(container["image"]) or target_info
+                            change = versions.describe_change(running_info, installed)
+                            change_text = f"  {color(change, Colors.DIM)}" if change else ""
+                            changes.append((name, change, versions.release_notes_url(installed or running_info)))
                             if ok:
                                 total_upg += 1
-                                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color('upgraded & verified', Colors.GREEN)}\033[K")
+                                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color('upgraded & verified', Colors.GREEN)}{change_text}\033[K")
                             else:
                                 total_err += 1; unstable.append((name, detail, project["name"]))
-                                print(f"\r{prefix}{color('!', Colors.RED)} {name:<20} {color('upgraded but unstable', Colors.RED)}\033[K")
+                                print(f"\r{prefix}{color('!', Colors.RED)} {name:<20} {color('upgraded but unstable', Colors.RED)}{change_text}\033[K")
 
                             guide = f"{'   ' if is_last_p else '│  '}{'   ' if is_last_c else '│  '}"
                             by_service = {c["service"]: c for c in containers}
@@ -455,7 +480,8 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                     else:
                         total_upd += 1
                         label = "would upgrade" if dry_run else "update available"
-                        print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<20} {color(label, Colors.YELLOW)}\033[K")
+                        changes.append((name, change, versions.release_notes_url(target_info or running_info)))
+                        print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<20} {color(label, Colors.YELLOW)}{change_text}\033[K")
                         if is_upgrade:
                             followers = docker_api.dependents_of(dependency_map(project), container["service"])
                             if followers:
@@ -474,6 +500,15 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
         if total_unk: print(color(f"? {total_unk} could not be verified without pulling", Colors.DIM))
         if total_err: print(color(f"! {total_err} error(s)", Colors.RED))
         
+        if changes:
+            heading = "Version changes:" if is_upgrade and not dry_run else "Available versions:"
+            print("\n" + color(heading, Colors.BOLD))
+            width = max(len(n) for n, _, _ in changes) + 2
+            for item, change, notes in changes:
+                print(f"  {item:<{width}}{change or color('version not published by the image', Colors.DIM)}")
+                if notes:
+                    print(color(f"  {'':<{width}}release notes: {notes}", Colors.DIM))
+
         if errors:
             print("\n" + color("Check details:", Colors.BOLD))
             for item, err in errors: print(f"  {color('!', Colors.RED)} {item}\n    {color(err, Colors.DIM)}")

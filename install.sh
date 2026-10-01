@@ -52,7 +52,7 @@ SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 
 say "Installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-for f in docky.py commands.py docker_api.py utils.py urls.py; do
+for f in docky.py commands.py docker_api.py utils.py urls.py versions.py; do
   cp "$SRC/$f" "$INSTALL_DIR/$f"
 done
 chmod +x "$INSTALL_DIR/docky.py"
