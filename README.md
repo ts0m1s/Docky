@@ -29,6 +29,7 @@ docky <command> [target]
 | `rollback [name] [service]` | Undo the last upgrade. Docky saves the previous image before every upgrade; with no arguments this lists the saved snapshots |
 | `sweep` | Find and clear stopped containers and unused images |
 | `orphans` | Find volumes belonging to deleted or renamed projects |
+| `remove <name\|path> [--volumes] [--images] [--files] [--all] [--dry-run] [-y]` | Remove a project completely. See [Removing a project](#removing-a-project) |
 | `start` / `stop` / `restart` `<name\|all>` | Control a project or all of them |
 
 ## Where Docky finds your projects
@@ -56,6 +57,24 @@ Docky runs Compose with the same files the project was started with, so `docker-
 - When Traefik labels name the web port, other published ports (such as a torrent port) are listed as "published", not as URLs.
 
 `docky urls --check` opens every URL and marks it ✓ or ✗ (doesn't resolve, refused, timed out, 5xx). A login page (401/403) counts as reachable. Use it to see which domains actually work from this machine; for example, a Cloudflare tunnel's DNS record may be missing.
+
+## Removing a project
+
+`docky remove <name>` first shows a plan of everything that belongs to the project, then asks before each part:
+
+- **Always removed:** the project's containers (running ones are stopped) and the networks Compose created for it.
+- **Optional:**
+  - `--volumes`: its named and anonymous volumes. **The data is gone for good.**
+  - `--images`: images no other container uses, plus Docky's rollback snapshots for it.
+  - `--files`: the project folder (compose files, `.env`, and any data stored inside it).
+- **Never touched:** external or shared volumes and networks, images other projects use, and bind-mounted data outside the project folder. These are listed in the plan so you know what stays.
+
+Without flags, Docky asks about each optional part. Deleting volumes or the folder requires typing the project name. `--all` selects everything, `--dry-run` shows the plan and changes nothing, and `-y` skips the prompts (only what you flagged is removed).
+
+Safety rails:
+- The folder is never offered if it's your home folder, a `DOCKY_ROOT` scan folder, or contains another project.
+- If any file in the folder can't be deleted (for example data a container wrote as root), nothing in the folder is deleted, and Docky prints the `sudo rm -rf` command to finish.
+- Projects whose folder was already moved or deleted can still be removed by name.
 
 ## License
 
