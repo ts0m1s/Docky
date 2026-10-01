@@ -11,7 +11,6 @@ installs anything on its own.
 """
 import json
 import os
-import py_compile
 import shutil
 import sys
 import tarfile
@@ -30,6 +29,9 @@ CHECK_INTERVAL = 24 * 3600
 
 class UpdateError(Exception):
     pass
+
+class SwapError(UpdateError):
+    """Failed after some files were already replaced."""
 
 # --- What's installed ----------------------------------------------------
 
@@ -123,9 +125,9 @@ def _validate(source):
     files = sorted(p.name for p in source.glob("*.py"))
     for name in files:
         try:
-            py_compile.compile(str(source / name), cfile=os.devnull, doraise=True)
-        except py_compile.PyCompileError as e:
-            raise UpdateError(f"new version doesn't compile ({name}): {e.msg.strip().splitlines()[-1]}")
+            compile((source / name).read_text(encoding="utf-8"), name, "exec")
+        except (SyntaxError, ValueError, UnicodeDecodeError) as e:
+            raise UpdateError(f"new version doesn't compile ({name}): {e}")
     return files
 
 def write_version(repo, ref, commit, date, files):
@@ -150,8 +152,15 @@ def install(repo, ref, target):
         try:
             for name in files:
                 shutil.copy2(source / name, staging / name)
-            for name in files:
-                os.replace(staging / name, INSTALL_DIR / name)
+            swapped = 0
+            try:
+                for name in files:
+                    os.replace(staging / name, INSTALL_DIR / name)
+                    swapped += 1
+            except OSError as e:
+                if swapped:
+                    raise SwapError(f"stopped partway through replacing files ({e}). Re-run the installer to repair.")
+                raise
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -270,8 +279,10 @@ def cmd_self_update(check_only=False):
 
     try:
         install(repo, ref, target)
-    except UpdateError as e:
+    except (UpdateError, OSError, tarfile.TarError) as e:
         print(f"{color('✕', Colors.RED)} {color(f'Update failed: {e}', Colors.RED)}")
+        if isinstance(e, SwapError):
+            return print(color("  curl -fsSL https://raw.githubusercontent.com/ts0m1s/Docky/main/install.sh | sh", Colors.DIM) + "\n")
         return print(color("  Nothing was changed; your current version still works.", Colors.DIM) + "\n")
     try:
         _state_file().unlink()  # the cached "new version" answer is now stale
