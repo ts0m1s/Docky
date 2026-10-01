@@ -8,7 +8,7 @@ import commands
 import selfupdate
 
 def show_usage():
-    print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)}\n{color('Docker Server Manager', Colors.DIM)}\n")
+    print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color(selfupdate.local_version() or '', Colors.DIM)}\n{color('Docker Server Manager', Colors.DIM)}\n")
     print(color("Usage:", Colors.BOLD) + "\n  docky <command> [target]\n")
     print(color("Commands:", Colors.BOLD))
     cmds = [

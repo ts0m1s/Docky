@@ -1,0 +1,39 @@
+# Publishes a GitHub release whenever a version tag is pushed:
+#   git tag v0.3.0 && git push origin v0.3.0
+# Tags with a suffix (v0.3.0-rc.1) become pre-releases, which the
+# "stable" channel never offers.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Every module compiles
+        run: python3 -m py_compile *.py
+
+      - name: Tag matches about.py
+        run: |
+          code="$(python3 -c 'import about; print(about.__version__)')"
+          tag="${GITHUB_REF_NAME#v}"
+          base="${tag%%-*}"   # v0.3.0-rc.1 -> 0.3.0
+          if [ "$code" != "$base" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match about.py (__version__ = $code). Bump about.py first."
+            exit 1
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- --verify-tag --generate-notes --title "Docky $GITHUB_REF_NAME"
+          case "$GITHUB_REF_NAME" in *-*) set -- "$@" --prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" "$@"
