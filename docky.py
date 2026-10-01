@@ -19,6 +19,8 @@ def show_usage():
         ("rollback [name] [service]", "Undo the last upgrade (no args: list saved snapshots)"),
         ("sweep", "Find and safely clear ghost data & unused images"),
         ("orphans", "Find volumes belonging to deleted or renamed projects"),
+        ("remove <name> [options]", "Remove a project: plan first, then containers & networks, optionally"),
+        ("", "  --volumes, --images, --files (or --all); --dry-run, -y to skip prompts"),
         ("start <name|all>", "Start a specific project or 'all'"),
         ("stop <name|all>", "Stop a specific project or 'all'"),
         ("restart <name|all>", "Restart a specific project or 'all'")
@@ -64,6 +66,24 @@ def main():
             commands.cmd_rollback(*(args[:2]))
         elif cmd == "sweep": commands.cmd_sweep()
         elif cmd == "orphans": commands.cmd_orphans()
+        elif cmd in ("remove", "rm"):
+            args = sys.argv[2:]
+            flags = {a for a in args if a.startswith("-")}
+            target = next((a for a in args if not a.startswith("-")), None)
+            unknown = flags - {"--volumes", "--images", "--files", "--all", "--dry-run", "-n", "-y", "--yes"}
+            if not target or unknown:
+                problem = f"Unknown option: {', '.join(sorted(unknown))}" if unknown else "Missing target."
+                print(f"\n{color('! ' + problem, Colors.RED)}\nUsage: {color('docky remove <project_name|path> [--volumes] [--images] [--files] [--all] [--dry-run] [-y]', Colors.BOLD)}\n")
+            else:
+                everything = "--all" in flags
+                commands.cmd_remove(
+                    target,
+                    volumes=everything or "--volumes" in flags,
+                    images=everything or "--images" in flags,
+                    files=everything or "--files" in flags,
+                    dry_run=bool(flags & {"--dry-run", "-n"}),
+                    assume_yes=bool(flags & {"-y", "--yes"}),
+                )
         elif cmd in ("start", "stop", "restart"):
             if len(sys.argv) < 3:
                 print(f"\n{color('! Missing target.', Colors.RED)}\nUsage: {color(f'docky {cmd} <project_name|all>', Colors.BOLD)}\n")
