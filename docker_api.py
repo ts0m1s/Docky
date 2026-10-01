@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -684,3 +685,211 @@ def get_all_volumes():
 def remove_volume(name):
     success, _, err = run_command(["docker", "volume", "rm", name])
     return success, err
+# --- Removing a whole project -------------------------------------------
+
+def compose_project_name(project):
+    """The name Compose labels this project's resources with."""
+    if project.get("project_name"):
+        return project["project_name"]
+    success, output, _ = run_command(compose_cmd(project, "config", "--format", "json"))
+    if success and output:
+        try:
+            resolved = json.loads(output).get("name")
+            if resolved:
+                return resolved
+        except json.JSONDecodeError:
+            pass
+    return sanitize_project_name(project["name"])
+
+def _lines(command):
+    success, output, _ = run_command(command)
+    return [l for l in output.splitlines() if l.strip()] if success else []
+
+def _is_anonymous_volume(name):
+    return bool(re.fullmatch(r"[0-9a-f]{64}", name))
+
+def _inside(path, parent):
+    try:
+        Path(path).resolve().relative_to(Path(parent).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+def folder_removal_block(path, other_projects):
+    """Why a project folder must not be deleted, or None if it's safe to offer."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return "path can't be resolved"
+    home = Path.home().resolve()
+    if resolved == Path("/") or resolved == home or _inside(home, resolved):
+        return "it is (or contains) your home folder"
+    if len(resolved.parts) < 3:
+        return "it is a top-level system folder"
+    for root in scan_roots():
+        if _same_location(resolved, root):
+            return "it is a DOCKY_ROOT scan folder, not a single project"
+    for other in other_projects:
+        if other.get("path") and _inside(other["path"], resolved):
+            return f"it also contains project '{other['name']}'"
+    return None
+
+def plan_removal(project, other_projects):
+    """
+    Everything that belongs to `project`, gathered without changing
+    anything. Ownership comes from the label Compose stamps on what it
+    creates, so external/shared volumes and networks -- which Compose
+    never labels with this project -- can't be swept up by mistake.
+    """
+    name = compose_project_name(project)
+    label = f"label={LABEL_PROJECT}={name}"
+
+    containers = []
+    for line in _lines(["docker", "ps", "-a", "--filter", label, "--format", "{{.ID}}|{{.Names}}|{{.State}}"]):
+        cid, cname, state = (line.split("|") + ["", ""])[:3]
+        containers.append({"id": cid, "name": cname, "state": state})
+
+    # What the project's containers run and mount.
+    image_ids, mounted_volumes, bind_sources = set(), set(), set()
+    if containers:
+        fmt = "{{.Image}}|{{json .Mounts}}"
+        for line in _lines(["docker", "inspect", "--format", fmt] + [c["id"] for c in containers]):
+            image_id, _, mounts_json = line.partition("|")
+            image_ids.add(image_id)
+            try:
+                mounts = json.loads(mounts_json) or []
+            except json.JSONDecodeError:
+                mounts = []
+            for m in mounts:
+                if m.get("Type") == "volume" and m.get("Name"):
+                    mounted_volumes.add(m["Name"])
+                elif m.get("Type") == "bind" and m.get("Source"):
+                    bind_sources.add(m["Source"])
+
+    networks = _lines(["docker", "network", "ls", "--filter", label, "--format", "{{.Name}}"])
+
+    sizes = get_volume_sizes()
+    labelled_volumes = set(_lines(["docker", "volume", "ls", "--filter", label, "--format", "{{.Name}}"]))
+    owned_volumes = labelled_volumes | {v for v in mounted_volumes if _is_anonymous_volume(v)}
+    volumes = [{"name": v, "size": sizes.get(v), "anonymous": _is_anonymous_volume(v)} for v in sorted(owned_volumes)]
+    kept_volumes = sorted(mounted_volumes - owned_volumes)
+
+    # Images: also the ones a never-started project would use, if present locally.
+    if project.get("files") and all(f.exists() for f in project["files"]):
+        for ref in _lines(compose_cmd(project, "config", "--images")):
+            image_id, _ = get_local_image_id(ref)
+            if image_id:
+                image_ids.add(image_id)
+
+    used_elsewhere = {}
+    all_ids = _lines(["docker", "ps", "-aq"])
+    if all_ids:
+        fmt = '{{.Image}}|{{index .Config.Labels "%s"}}|{{.Name}}' % LABEL_PROJECT
+        for line in _lines(["docker", "inspect", "--format", fmt] + all_ids):
+            image_id, owner, cname = (line.split("|") + ["", ""])[:3]
+            if owner != name:
+                used_elsewhere.setdefault(image_id, owner or cname.lstrip("/"))
+
+    images, kept_images = [], []
+    for image_id in sorted(image_ids):
+        out = _lines(["docker", "image", "inspect", "--format", "{{.Id}}|{{join .RepoTags \",\"}}|{{.Size}}", image_id])
+        if not out:
+            continue
+        full_id, tags, size = (out[0].split("|") + ["", ""])[:3]
+        entry = {"id": full_id, "tags": [t for t in tags.split(",") if t], "size": int(size) if size.isdigit() else 0}
+        if full_id in used_elsewhere:
+            entry["used_by"] = used_elsewhere[full_id]
+            kept_images.append(entry)
+        else:
+            images.append(entry)
+
+    snapshots = []
+    state = load_rollback_state()
+    for key in {project["name"], name}:
+        for service, entry in state.get(key, {}).items():
+            snapshots.append({"state_key": key, "service": service, "tag": entry.get("tag")})
+
+    folder, folder_block = None, None
+    if project.get("path") and Path(project["path"]).is_dir():
+        folder = Path(project["path"])
+        others = [p for p in other_projects if not _same_location(p.get("path"), folder)]
+        folder_block = folder_removal_block(folder, others)
+
+    external_binds = sorted(b for b in bind_sources if not (folder and _inside(b, folder)))
+
+    return {
+        "name": name,
+        "containers": containers,
+        "networks": networks,
+        "volumes": volumes,
+        "kept_volumes": kept_volumes,
+        "images": images,
+        "kept_images": kept_images,
+        "snapshots": snapshots,
+        "folder": folder,
+        "folder_block": folder_block,
+        "external_binds": external_binds,
+    }
+
+def remove_containers_and_networks(project, plan):
+    """compose down when the files are there; label cleanup for whatever's left."""
+    errors = []
+    files_ok = project.get("files") and all(f.exists() for f in project["files"])
+    if files_ok:
+        succ, _, err = run_command(compose_cmd(dict(project, project_name=plan["name"]), "down", "--remove-orphans"))
+        if not succ:
+            errors.append(f"compose down: {err}")
+
+    label = f"label={LABEL_PROJECT}={plan['name']}"
+    leftover = _lines(["docker", "ps", "-aq", "--filter", label])
+    if leftover:
+        succ, _, err = run_command(["docker", "rm", "-f"] + leftover)
+        if not succ:
+            errors.append(f"container removal: {err}")
+    for network in _lines(["docker", "network", "ls", "--filter", label, "--format", "{{.Name}}"]):
+        succ, _, err = run_command(["docker", "network", "rm", network])
+        if not succ:
+            errors.append(f"network {network}: {err}")
+    return errors
+
+def remove_images(plan):
+    errors = []
+    for image in plan["images"]:
+        succ, _, err = run_command(["docker", "image", "rm", "-f", image["id"]])
+        if not succ:
+            errors.append(f"{', '.join(image['tags']) or image['id'][:19]}: {err}")
+    state = load_rollback_state()
+    for snap in plan["snapshots"]:
+        if snap["tag"]:
+            run_command(["docker", "rmi", snap["tag"]])
+        state.get(snap["state_key"], {}).pop(snap["service"], None)
+        if not state.get(snap["state_key"], True):
+            state.pop(snap["state_key"], None)
+    if plan["snapshots"]:
+        save_rollback_state(state)
+    return errors
+
+def _undeletable(path):
+    """First entry we couldn't delete, or None. Checked before deleting anything."""
+    for current, dirs, files in os.walk(path, onerror=lambda e: (_ for _ in ()).throw(e)):
+        if (dirs or files) and not os.access(current, os.W_OK | os.X_OK):
+            return os.path.join(current, (dirs + files)[0])
+    return None
+
+def remove_folder(path):
+    """
+    Delete the project folder -- all or nothing. Containers often write
+    bind-mounted data as root; finding that halfway through would leave a
+    half-deleted project, so permissions are checked up front.
+    """
+    try:
+        blocked = _undeletable(path)
+    except OSError as e:
+        blocked = e.filename or str(path)
+    if blocked:
+        return False, f"no permission to delete {blocked} (written by a container as root?); nothing in the folder was deleted"
+    try:
+        shutil.rmtree(path)
+        return True, ""
+    except OSError as e:
+        return False, str(e)
