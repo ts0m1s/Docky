@@ -5,6 +5,7 @@ import shutil
 import sys
 from utils import Colors, color, run_command
 import commands
+import selfupdate
 
 def show_usage():
     print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)}\n{color('Docker Server Manager', Colors.DIM)}\n")
@@ -24,12 +25,16 @@ def show_usage():
         ("", "  --volumes, --images, --files (or --all); --dry-run, -y to skip prompts"),
         ("start <name|all>", "Start a specific project or 'all'"),
         ("stop <name|all>", "Stop a specific project or 'all'"),
-        ("restart <name|all>", "Restart a specific project or 'all'")
+        ("restart <name|all>", "Restart a specific project or 'all'"),
+        ("self-update [--check]", "Update Docky itself to the latest version"),
+        ("--version", "Show the installed Docky version"),
     ]
     for cmd, desc in cmds:
         print(f"  {color(f'{cmd:<28}', Colors.CYAN)} {desc}")
     print(f"\n{color('Projects:', Colors.BOLD)} found from Docker itself, wherever they live, plus folders in")
     print(f"  {color('DOCKY_ROOT', Colors.CYAN)} (':'-separated paths, default ~/docker). A path works as a target too.\n")
+    print(f"{color('Updates:', Colors.BOLD)} Docky checks once a day for a newer version of itself and says so.")
+    print(f"  Turn that off with {color('DOCKY_NO_UPDATE_CHECK=1', Colors.CYAN)}.\n")
 
 def preflight():
     """Fail with a readable message if Docker isn't installed or reachable."""
@@ -49,8 +54,14 @@ def main():
             return show_usage()
 
         cmd = sys.argv[1].lower()
+        # Neither needs Docker -- self-update must work even when Docker doesn't.
+        if cmd in ("--version", "-v", "version"):
+            return selfupdate.cmd_version()
+        if cmd in ("self-update", "selfupdate"):
+            return selfupdate.cmd_self_update(check_only="--check" in sys.argv[2:])
         if cmd not in ("help", "-h", "--help") and not preflight():
             sys.exit(1)
+        update_check = selfupdate.BackgroundCheck()
         if cmd in ("help", "-h", "--help"):
             return show_usage()
         if cmd == "status": commands.cmd_status()
@@ -97,7 +108,11 @@ def main():
         else:
             print(f"\n{color(f'! Unknown command: {cmd}', Colors.RED)}")
             show_usage()
-            
+
+        notice = update_check.notice()
+        if notice:
+            print(color(f"↑ {notice}", Colors.YELLOW) + "\n")
+
     except KeyboardInterrupt:
         sys.stdout.write("\r\033[K\n")
         print(color("Aborted by user.", Colors.RED))
