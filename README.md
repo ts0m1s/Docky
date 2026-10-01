@@ -7,10 +7,24 @@ Zero dependencies: just Python 3.8+ and Docker.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DimiKont/Docky/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ts0m1s/Docky/main/install.sh | sh
 ```
 
-This installs to `~/.local/share/docky` and links `~/.local/bin/docky`. Pin a version with `DOCKY_REF=v0.1.0`. To uninstall, delete those two paths.
+This installs to `~/.local/share/docky` and links `~/.local/bin/docky`. To uninstall, delete those two paths.
+
+## Updating Docky
+
+```sh
+docky self-update          # install the latest version
+docky self-update --check  # just show what's new
+docky --version            # what's installed
+```
+
+`self-update` follows the `main` branch and lists the changes since your version. The new version is downloaded and compiled in a temporary folder first, then swapped in, so a failed download never leaves Docky half-updated. If you installed as root, run it with `sudo`.
+
+Once a day, after a command finishes, Docky prints a one-line notice when a newer version exists. It never updates on its own. Turn the notice off with `export DOCKY_NO_UPDATE_CHECK=1`.
+
+Installs from before self-update existed don't record their version. Run the install command once more, and `docky self-update` works from then on. To follow a different branch, install with `DOCKY_REF=<branch>`; self-update keeps following it.
 
 ## Usage
 

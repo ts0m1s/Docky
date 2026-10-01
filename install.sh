@@ -1,9 +1,12 @@
 #!/bin/sh
 # Docky installer
-#   curl -fsSL https://raw.githubusercontent.com/DimiKont/Docky/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ts0m1s/Docky/main/install.sh | sh
+#
+# Once installed, update with `docky self-update`; no need to run this again.
 #
 # Environment overrides:
-#   DOCKY_REF      git branch or tag to install (default: main)
+#   DOCKY_REF      git branch or tag to install and follow (default: main)
+#   DOCKY_REPO     GitHub repo to install from (default: ts0m1s/Docky)
 #   DOCKY_HOME     where the files go (default: ~/.local/share/docky)
 #   DOCKY_BIN_DIR  where the `docky` command is linked
 #                  (default: /usr/local/bin as root, otherwise ~/.local/bin)
@@ -11,7 +14,7 @@
 
 set -eu
 
-REPO="DimiKont/Docky"
+REPO="${DOCKY_REPO:-ts0m1s/Docky}"
 REF="${DOCKY_REF:-main}"
 INSTALL_DIR="${DOCKY_HOME:-$HOME/.local/share/docky}"
 if [ "$(id -u)" -eq 0 ]; then
@@ -43,8 +46,16 @@ command -v docker >/dev/null 2>&1 || warn "Docker was not found in PATH. Docky n
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-say "Downloading Docky ($REF)..."
-fetch "https://github.com/$REPO/archive/$REF.tar.gz" | tar -xz -C "$TMP" \
+# Pin the exact commit, so `docky self-update` knows what's installed.
+COMMIT_JSON="$(fetch "https://api.github.com/repos/$REPO/commits/$REF" 2>/dev/null || true)"
+COMMIT="$(printf '%s\n' "$COMMIT_JSON" | sed -n 's/^  "sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
+DATE="$(printf '%s\n' "$COMMIT_JSON" | sed -n 's/.*"date": "\([0-9-]\{10\}\)T.*/\1/p' | tail -n 1)"
+if [ -z "$COMMIT" ]; then
+  warn "Couldn't look up the exact commit (GitHub API unreachable?); 'docky self-update' will reinstall to be sure."
+fi
+
+say "Downloading Docky ($REF${COMMIT:+ @ $(printf %.7s "$COMMIT")})..."
+fetch "https://codeload.github.com/$REPO/tar.gz/${COMMIT:-$REF}" | tar -xz -C "$TMP" \
   || die "Download failed. Is the repository public and the ref '$REF' valid?"
 
 SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
@@ -52,10 +63,23 @@ SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 
 say "Installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-for f in docky.py commands.py docker_api.py utils.py; do
-  cp "$SRC/$f" "$INSTALL_DIR/$f"
+FILES=""
+for path in "$SRC"/*.py; do
+  f="$(basename "$path")"
+  cp "$path" "$INSTALL_DIR/$f"
+  FILES="$FILES${FILES:+, }\"$f\""
 done
 chmod +x "$INSTALL_DIR/docky.py"
+rm -rf "$INSTALL_DIR/__pycache__"
+cat > "$INSTALL_DIR/VERSION" <<EOF
+{
+  "repo": "$REPO",
+  "ref": "$REF",
+  "commit": "$COMMIT",
+  "date": "$DATE",
+  "files": [$FILES]
+}
+EOF
 ln -sf "$INSTALL_DIR/docky.py" "$BIN_DIR/docky"
 
 say "Installed: $BIN_DIR/docky"
