@@ -32,6 +32,8 @@ def show_usage():
         print(f"  {color(f'{cmd:<28}', Colors.CYAN)} {desc}")
     print(f"\n{color('Projects:', Colors.BOLD)} found from Docker itself, wherever they live, plus folders in")
     print(f"  {color('DOCKY_ROOT', Colors.CYAN)} (':'-separated paths, default ~/docker). A path works as a target too.\n")
+    print(f"{color('Updates:', Colors.BOLD)} Docky checks once a day for a newer version of itself and says so.")
+    print(f"  Turn that off with {color('DOCKY_NO_UPDATE_CHECK=1', Colors.CYAN)}.\n")
 
 def preflight():
     """Fail with a readable message if Docker isn't installed or reachable."""
