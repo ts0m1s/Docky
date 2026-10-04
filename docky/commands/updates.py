@@ -17,7 +17,7 @@ def check_image_with_version(image, allow_pull):
     if res["status"] == "update":
         # A pull-based check already has the new image locally; otherwise
         # read the registry's config without pulling.
-        res["remote_info"] = versions.local_version(image) if res.get("checked_via") == "pull" else versions.remote_version(image)
+        res["remote_info"] = versions.local_version(image) if res.get("checked_via") == "pull" else versions.remote_version(image, res.get("remote"))
     return res
 
 def classify(container, res, local_infos):
@@ -148,7 +148,7 @@ def _show_checks(project_data, image_futures, local_future, is_upgrade):
             elif status == "update":
                 total_upd += 1
                 # ↑ already says "update available"; the row is just name, change, notes.
-                url = versions.release_notes_url(target_info or running_info)
+                url = versions.release_notes_url(target_info, running_info)
                 print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<{name_w}}{notes.tail(len(prefix) + 2 + name_w, change, url, name)}\033[K")
                 if is_upgrade:
                     if dependency_map is None:
@@ -221,7 +221,7 @@ def _upgrade_project(project, containers, items):
             installed = versions.local_version(c["image"]) or target_info  # what actually got installed
             rows.append((c, ok, "upgraded & verified" if ok else "upgraded but unstable", detail,
                          versions.describe_change(running_info, installed),
-                         versions.release_notes_url(installed or running_info)))
+                         versions.release_notes_url(installed, running_info)))
     followers = []
     for f, ok, err in follower_results:
         if ok and f in by_service:

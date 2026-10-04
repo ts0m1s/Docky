@@ -10,7 +10,9 @@ everything `latest` and put nothing useful in their labels; those fall
 back to the build date, which still says how old each side is.
 """
 import json
+import os
 import re
+import threading
 from functools import lru_cache
 from .utils import run_command
 from . import registry
@@ -78,13 +80,91 @@ def _platform():
     ok, out, _ = run_command(["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"])
     return out if ok and out else "linux/amd64"
 
-def remote_version(image):
-    """Version info for the image the registry serves for this tag, without pulling. None if unreadable."""
-    try:  # fast path: ask the registry directly, for our platform only
+# --- Remembered remote versions -----------------------------------------------
+# An image digest never changes what it points to, so once a digest's version
+# is known it's known for good. Remembering it means later checks only ask
+# "has the tag moved?" -- a request Docker Hub doesn't rate-limit.
+
+_cache, _cache_lock = None, threading.Lock()
+CACHE_SIZE = 500
+
+def _cache_path():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "docky", "remote-versions.json")
+
+def _cache_get(key):
+    global _cache
+    with _cache_lock:
+        if _cache is None:
+            try:
+                with open(_cache_path()) as f:
+                    _cache = json.load(f)
+            except (OSError, ValueError):
+                _cache = {}
+        return _cache.get(key)
+
+def _cache_put(key, info):
+    with _cache_lock:
+        _cache[key] = {k: info.get(k) for k in ("version", "created", "source")}
+        while len(_cache) > CACHE_SIZE:
+            _cache.pop(next(iter(_cache)))  # oldest first
+        path = _cache_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(_cache, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass  # can't remember it this time; next run asks again
+
+def remote_version(image, digest=None):
+    """
+    Version info for what the registry serves for this tag right now.
+    Tried in order, stopping at the first that knows:
+      1. remembered for this digest
+      2. the registry itself (labels of our platform's image)
+      3. Docker Hub's website: the version tag pointing at the same image
+         (also when the labels only say "latest") -- it still answers when
+         the registry's pull limit is used up
+      4. the docker CLI (private registries, credentials)
+    If nothing can tell, the result says why instead of guessing.
+    """
+    key = f"{image}@{digest}" if digest else None
+    if key:
+        cached = _cache_get(key)
+        if cached:
+            return cached
+
+    info, reason = None, None
+    try:
         data = registry.remote_config(image, _platform())
-        return _from_config((data.get("config") or {}).get("Labels"), data.get("created"))
+        info = _from_config((data.get("config") or {}).get("Labels"), data.get("created"))
+    except registry.RateLimited as e:
+        reason = str(e)
     except (registry.RegistryError, ValueError, AttributeError):
-        pass  # private registry, odd auth, …: the docker CLI knows the credentials
+        info = _cli_remote_version(image)
+
+    if info is None or not info.get("version"):
+        try:
+            hub = registry.docker_hub_tag(image)
+            if not digest or hub["digest"] == digest:
+                if info is None:
+                    info = {"version": hub["version"], "created": hub["created"], "source": None}
+                elif hub["version"]:
+                    info = dict(info, version=hub["version"])
+        except registry.RegistryError:
+            pass
+
+    if info is None or not (info.get("version") or info.get("created")):
+        return {"version": None, "created": None, "source": None,
+                "unavailable": reason or "the registry didn't answer"}
+    if key:
+        _cache_put(key, info)
+    return info
+
+def _cli_remote_version(image):
+    """Version info via `docker buildx imagetools` -- slow, but uses your docker credentials."""
     ok, out, _ = run_command(["docker", "buildx", "imagetools", "inspect", image, "--format", "{{json .Image}}"])
     if not ok or not out:
         return None
@@ -111,6 +191,10 @@ def describe_change(old, new):
         return None
     old, new = old or {}, new or {}
     ov, nv = old.get("version"), new.get("version")
+    if new.get("unavailable"):
+        # Never a bare "?": say what's known and why the rest isn't.
+        left = ov or (f"built {old['created']}" if old.get("created") else "current")
+        return f"{left} → newer image (version unknown: {new['unavailable']})"
     if ov and nv and ov != nv:
         return f"{ov} → {nv}"
     if ov and nv:  # same version string, new build
@@ -131,9 +215,13 @@ def describe_current(info):
         return info["version"]
     return f"built {info['created']}" if info.get("created") else None
 
-def release_notes_url(info):
-    """Releases page for images that say where their source lives (GitHub/GitLab/Codeberg)."""
-    source = (info or {}).get("source") or ""
+def release_notes_url(*infos):
+    """
+    Releases page for images that say where their source lives (GitHub/
+    GitLab/Codeberg). Takes the first info that names a source -- the new
+    image's, else the running one's (a version from hub.docker.com has none).
+    """
+    source = next(((i or {}).get("source") for i in infos if (i or {}).get("source")), "") or ""
     if re.match(r"https://(github\.com|gitlab\.com|codeberg\.org)/[^/]+/[^/]+/?$", source):
         return source.rstrip("/") + "/releases"
     return None

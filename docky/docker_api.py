@@ -369,6 +369,11 @@ def check_image(image, allow_pull=True):
     remote_digest = None
     try:  # fast path: one HEAD request straight to the registry
         remote_digest = registry.remote_digest(image)
+    except registry.RateLimited:
+        try:  # Docker Hub's website still answers when the pull limit is used up
+            remote_digest = registry.docker_hub_tag(image)["digest"]
+        except registry.RegistryError:
+            pass  # the CLI would hit the same limit; report "unknown"
     except registry.RegistryError:
         succ, out, _ = run_command(["docker", "buildx", "imagetools", "inspect", image])
         if succ:

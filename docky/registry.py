@@ -15,10 +15,13 @@ Only anonymous (public) access is attempted. Anything unexpected --
 private images, odd auth, network trouble -- raises RegistryError, and
 the caller falls back to the docker CLI, which knows your credentials.
 """
+import base64
 import hashlib
 import http.client
 import json
+import os
 import re
+import subprocess
 import threading
 import urllib.parse
 
@@ -34,6 +37,9 @@ MANIFEST_TYPES = [
 
 class RegistryError(Exception):
     pass
+
+class RateLimited(RegistryError):
+    """The registry refused for now (HTTP 429), e.g. Docker Hub's anonymous pull limit."""
 
 def parse_reference(image):
     """'lscr.io/linuxserver/sonarr:latest' -> ('lscr.io', 'linuxserver/sonarr', 'latest')."""
@@ -96,13 +102,53 @@ def _fetch(url, method="GET", headers=None, redirects=3):
         return _fetch(target, method, headers, redirects - 1)
     return response.status, response.msg, body
 
-def _token(challenge):
-    """Anonymous bearer token from a 'WWW-Authenticate: Bearer realm=...' challenge."""
+_credential_cache = {}
+
+def _credentials(registry):
+    """
+    (user, secret) from `docker login`, if you've logged in to this registry:
+    credential helpers (credsStore / credHelpers) or plain entries in
+    ~/.docker/config.json. Logged-in requests get higher rate limits.
+    """
+    key = {"registry-1.docker.io": "https://index.docker.io/v1/", "lscr.io": "ghcr.io"}.get(registry, registry)
+    if key in _credential_cache:
+        return _credential_cache[key]
+    found = None
+    try:
+        config_dir = os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker")
+        with open(os.path.join(config_dir, "config.json")) as f:
+            config = json.load(f)
+        helper = (config.get("credHelpers") or {}).get(key) or config.get("credsStore")
+        if helper:
+            result = subprocess.run([f"docker-credential-{helper}", "get"], input=key,
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                if data.get("Username") and data.get("Secret"):
+                    found = (data["Username"], data["Secret"])
+        if not found:
+            auth = ((config.get("auths") or {}).get(key) or {}).get("auth")
+            if auth:
+                user, _, secret = base64.b64decode(auth).decode().partition(":")
+                found = (user, secret) if user and secret else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        found = None
+    _credential_cache[key] = found
+    return found
+
+def _token(challenge, registry=None):
+    """Bearer token for a 'WWW-Authenticate: Bearer realm=...' challenge (logged in if possible)."""
     params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
     if not challenge.lower().startswith("bearer") or "realm" not in params:
         raise RegistryError("registry needs credentials")
     query = urllib.parse.urlencode({k: v for k, v in params.items() if k in ("service", "scope")})
-    status, _, body = _fetch(f"{params['realm']}?{query}")
+    status, body = 0, b""
+    creds = _credentials(registry) if registry else None
+    if creds:
+        basic = base64.b64encode(f"{creds[0]}:{creds[1]}".encode()).decode()
+        status, _, body = _fetch(f"{params['realm']}?{query}", headers={"Authorization": f"Basic {basic}"})
+    if status != 200:  # not logged in, or the saved login was refused: anonymous
+        status, _, body = _fetch(f"{params['realm']}?{query}")
     if status != 200:
         raise RegistryError(f"token request: HTTP {status}")
     try:
@@ -131,7 +177,7 @@ def _call(registry, repo, path, method="GET", accept=None):
     if not have_token and registry in KNOWN_AUTH:
         realm, service = KNOWN_AUTH[registry]
         try:
-            token = _token(f'Bearer realm="{realm}",service="{service}",scope="repository:{repo}:pull"')
+            token = _token(f'Bearer realm="{realm}",service="{service}",scope="repository:{repo}:pull"', registry)
             with _lock:
                 _tokens[key] = token
         except RegistryError:
@@ -144,10 +190,12 @@ def _call(registry, repo, path, method="GET", accept=None):
             headers["Authorization"] = f"Bearer {token}"
         status, response_headers, body = _fetch(url, method, headers)
         if status == 401 and attempt == 1:
-            new_token = _token(response_headers.get("WWW-Authenticate", ""))
+            new_token = _token(response_headers.get("WWW-Authenticate", ""), registry)
             with _lock:
                 _tokens[key] = new_token
             continue
+        if status == 429:
+            raise RateLimited("Docker Hub rate limit" if registry == "registry-1.docker.io" else f"{registry} rate limit")
         if status != 200:
             raise RegistryError(f"HTTP {status} for {path}")
         return response_headers, body
@@ -187,3 +235,40 @@ def remote_config(image, platform):
         raise RegistryError("manifest has no config")
     _, body = _call(registry, repo, f"blobs/{config_digest}")
     return json.loads(body)
+
+# --- Docker Hub's website API -----------------------------------------------
+# hub.docker.com is separate from the registry and its pull rate limit, so it
+# still answers when the registry says 429. It knows each tag's digest and
+# which other tags point at the same image -- e.g. latest == 0.21.0.
+
+VERSION_TAG = re.compile(r"^v?\d+(\.\d+)+([-_.+][0-9A-Za-z.]+)?$")
+
+def _hub_json(path):
+    status, _, body = _fetch(f"https://hub.docker.com{path}")
+    if status == 429:
+        raise RateLimited("Docker Hub rate limit")
+    if status != 200:
+        raise RegistryError(f"hub.docker.com: HTTP {status}")
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise RegistryError("hub.docker.com: not JSON")
+
+def docker_hub_tag(image):
+    """{"digest", "version", "created"} for a Docker Hub image, from hub.docker.com."""
+    registry, repo, tag = parse_reference(image)
+    if registry != "registry-1.docker.io":
+        raise RegistryError("not a Docker Hub image")
+    this = _hub_json(f"/v2/repositories/{repo}/tags/{urllib.parse.quote(tag)}")
+    digest = this.get("digest")
+    if not digest:
+        raise RegistryError("hub.docker.com: no digest for tag")
+    version = tag if VERSION_TAG.match(tag) else None
+    if not version:
+        # The most specific version tag pointing at the same image: 0.21.0 over 0.21 and 0.
+        recent = _hub_json(f"/v2/repositories/{repo}/tags?page_size=100&ordering=last_updated")
+        siblings = [t["name"] for t in recent.get("results", [])
+                    if t.get("digest") == digest and VERSION_TAG.match(t.get("name", ""))]
+        if siblings:
+            version = max(siblings, key=lambda n: (n.count(".") + n.count("-"), len(n)))
+    return {"digest": digest, "version": version, "created": (this.get("last_updated") or "")[:10] or None}
