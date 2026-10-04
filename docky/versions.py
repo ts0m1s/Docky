@@ -13,6 +13,7 @@ import json
 import re
 from functools import lru_cache
 from .utils import run_command
+from . import registry
 
 VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version", "version")
 # Label values that name a channel, not a version.
@@ -50,6 +51,28 @@ def local_version(image):
         labels = {}
     return _from_config(labels, created)
 
+def local_versions(refs):
+    """
+    {ref: version info} for many local images (tags or IDs) in a single
+    `docker image inspect` -- one call instead of one per container.
+    Images that don't exist locally are simply missing from the result.
+    """
+    refs = sorted({r for r in refs if r})
+    if not refs:
+        return {}
+    _, out, _ = run_command(["docker", "image", "inspect", *refs])  # stdout still lists the ones found
+    try:
+        images = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        return {}
+    by_key = {}
+    for image in images:
+        info = _from_config((image.get("Config") or {}).get("Labels") or {}, image.get("Created"))
+        for key in [image.get("Id")] + (image.get("RepoTags") or []):
+            if key:
+                by_key[key] = info
+    return {ref: by_key[ref] for ref in refs if ref in by_key}
+
 @lru_cache(maxsize=1)
 def _platform():
     ok, out, _ = run_command(["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"])
@@ -57,6 +80,11 @@ def _platform():
 
 def remote_version(image):
     """Version info for the image the registry serves for this tag, without pulling. None if unreadable."""
+    try:  # fast path: ask the registry directly, for our platform only
+        data = registry.remote_config(image, _platform())
+        return _from_config((data.get("config") or {}).get("Labels"), data.get("created"))
+    except (registry.RegistryError, ValueError, AttributeError):
+        pass  # private registry, odd auth, …: the docker CLI knows the credentials
     ok, out, _ = run_command(["docker", "buildx", "imagetools", "inspect", image, "--format", "{{json .Image}}"])
     if not ok or not out:
         return None
