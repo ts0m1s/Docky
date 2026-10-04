@@ -58,9 +58,25 @@ def show_usage(full=False):
     print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color(selfupdate.local_version() or '', Colors.DIM)}\n{color('Docker Server Manager', Colors.DIM)}\n")
     print(color("Usage:", Colors.BOLD) + "\n  docky <command> [target]\n")
     print(color("Commands:", Colors.BOLD))
-    for cmd, desc in COMMANDS:
-        if cmd == "help":
-            continue
+    cmds = [
+        ("status", "Show Docker projects, containers, and system metrics"),
+        ("projects", "List every project Docky found and where it lives"),
+        ("urls [name] [--check]", "Show where each service is reachable; --check tests every URL"),
+        ("top [--sort cpu|mem]", "Live CPU, memory, network and disk use per container"),
+        ("updates", "Check for image updates, showing old → new version"),
+        ("upgrade [name] [--dry-run]", "Pull and recreate outdated containers, listing version changes"),
+        ("rollback [name] [service]", "Undo the last upgrade (no args: list saved snapshots)"),
+        ("sweep", "Find and safely clear ghost data & unused images"),
+        ("orphans", "Find volumes belonging to deleted or renamed projects"),
+        ("remove <name> [options]", "Remove a project: plan first, then containers & networks, optionally"),
+        ("", "  --volumes, --images, --files (or --all); --dry-run, -y to skip prompts"),
+        ("start <name|all>", "Start a specific project or 'all'"),
+        ("stop <name|all>", "Stop a specific project or 'all'"),
+        ("restart <name|all>", "Restart a specific project or 'all'"),
+        ("self-update [--check]", "Update Docky itself to the latest version"),
+        ("--version", "Show the installed Docky version"),
+    ]
+    for cmd, desc in cmds:
         print(f"  {color(f'{cmd:<28}', Colors.CYAN)} {desc}")
     if not full:
         print(f"\n{color('Run', Colors.DIM)} docky --help {color('for how projects are found, updates, tab completion and settings.', Colors.DIM)}\n")
@@ -164,7 +180,15 @@ def main():
             args = sys.argv[2:]
             target = next((a for a in args if not a.startswith("-")), None)
             commands.cmd_urls(target=target, check="--check" in args)
-        elif cmd == "top": commands.cmd_top()
+        elif cmd == "top":
+            args = sys.argv[2:]
+            sort = "name"
+            for i, a in enumerate(args):
+                if a.startswith("--sort="):
+                    sort = a.split("=", 1)[1]
+                elif a == "--sort":
+                    sort = args[i + 1] if i + 1 < len(args) else ""
+            commands.cmd_top(sort=sort.lower())
         elif cmd in ("updates", "update"): commands.cmd_updates(is_upgrade=False)
         elif cmd == "upgrade":
             args = sys.argv[2:]
