@@ -276,6 +276,19 @@ class BackgroundCheck:
             return f"Docky {theirs} is available (you have {mine}). Run: docky self-update"
         return "A newer build of Docky is available. Run: docky self-update"
 
+def refresh_completion():
+    """
+    Regenerate tab completion with the code just installed -- run as a new
+    process, since this one still has the old modules loaded. Versions
+    without completion simply don't have the command; that's fine.
+    """
+    import subprocess
+    try:
+        subprocess.run([sys.executable, str(INSTALL_DIR / "docky.py"), "completion", "--install"],
+                       timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
 # --- Commands ------------------------------------------------------------
 
 def _short(commit):
@@ -341,4 +354,5 @@ def cmd_self_update(check_only=False):
         _state_file().unlink()  # the cached "new version" answer is now stale
     except OSError:
         pass
+    refresh_completion()
     print(f"{color('✓', Colors.GREEN)} Updated to {label(target['version'], target['commit'])}. Run 'docky help' to see what's new.\n")
