@@ -62,7 +62,7 @@ docky <command> [target]
 | `projects` | List every project Docky found, where it lives, and the compose files it uses |
 | `urls [name] [--check]` | Show where each service is reachable: domains from Traefik, LAN and Tailscale addresses from published ports. `--check` tests every URL |
 | `status` | Show Docker projects, containers, and system metrics. Flags containers whose shared network (`network_mode: container:...`) points at a container that no longer exists |
-| `top` | Live CPU and RAM usage mapped to your projects |
+| `top [--sort cpu\|mem]` | Live view per container: CPU, memory (and how close it is to its limit), network and disk as per-second rates. Columns fit the terminal; `--sort` puts the heaviest projects and containers first |
 | `updates` | Check for available image updates, showing the version change (e.g. `4.0.20-ls325 → 4.0.20-ls326`) and a release-notes link |
 | `upgrade [name] [--dry-run]` | Pull and recreate outdated containers, verifying health, and list each version change. Give a project name to upgrade just that one; `--dry-run` shows the plan without changing anything. Services that share an upgraded service's network (`network_mode: service:X`) or depend on it with `restart: true` are recreated along with it, so e.g. qBittorrent behind gluetun keeps its connection. `rollback` does the same |
 | `rollback [name] [service]` | Undo the last upgrade. Docky saves the previous image before every upgrade; with no arguments this lists the saved snapshots |

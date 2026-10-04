@@ -5,8 +5,9 @@ import re
 import concurrent.futures
 import shlex
 from pathlib import Path
-from utils import Colors, color, run_command, get_system_metrics, parse_pct, render_bar
+from utils import Colors, color, run_command, get_system_metrics
 import docker_api
+import monitor
 import urls as urls_api
 import versions
 
@@ -231,109 +232,13 @@ def cmd_status():
     print_stale(stale)
 
 
-def render_top_frame(project_data, stats_map, metrics):
-    lines = []
-    lines.append(
-        color("● DOCKY", Colors.BOLD + Colors.CYAN)
-        + color("  ·  Resource Monitor", Colors.DIM)
-        + color("   (Ctrl+C to exit)", Colors.DIM)
-    )
-    lines.append("")
-    lines.append(f"  ○ Storage : {metrics['disk_str']}")
-    lines.append(f"  ○ Memory  : {metrics['ram_str']}")
-    lines.append("")
-
-    for p_idx, data in enumerate(project_data):
-        project, containers = data["project"], data["containers"]
-        is_last_p = (p_idx == len(project_data) - 1)
-        lines.append(f"{'└─' if is_last_p else '├─'} {color(project['name'], Colors.CYAN + Colors.BOLD)}")
-
-        if not containers:
-            lines.append(f"{'   ' if is_last_p else '│  '}└─ {color('no containers', Colors.DIM)}")
-            continue
-
-        for c_idx, container in enumerate(containers):
-            is_last_c = (c_idx == len(containers) - 1)
-            prefix = f"{'   ' if is_last_p else '│  '}{'└─' if is_last_c else '├─'} "
-            name = container["short_name"]
-            state = container["state"].lower()
-
-            if state == "running" and container["name"] in stats_map:
-                s = stats_map[container["name"]]
-                cpu_val = parse_pct(s["cpu"])
-                mem_val = parse_pct(s["mem_pct"])
-
-                cpu_color = Colors.RED if cpu_val > 50 else (Colors.YELLOW if cpu_val > 10 else Colors.GREEN)
-                mem_color = Colors.RED if mem_val > 80 else (Colors.YELLOW if mem_val > 50 else Colors.GREEN)
-
-                cpu_str = color(f"{cpu_val:>5.1f}%", cpu_color)
-                mem_str = color(f"{mem_val:>5.1f}%", mem_color)
-                mem_used_str = color(f"({s['mem_used']})", Colors.DIM)
-
-                row = (
-                    f"{prefix}{container_indicator(state)} {name:<18} "
-                    f"CPU {color(render_bar(cpu_val), cpu_color)} {cpu_str}  "
-                    f"RAM {color(render_bar(mem_val), mem_color)} {mem_str} {mem_used_str:<20}  "
-                    f"NET {color(s['net'], Colors.CYAN)}  "
-                    f"IO {color(s['blk'], Colors.CYAN)}"
-                )
-                lines.append(row)
-            else:
-                lines.append(f"{prefix}{container_indicator(state)} {name:<18} {color('offline', Colors.DIM)}")
-
-    lines.append("")
-    return "\n".join(lines)
-
-
-def cmd_top():
+def cmd_top(sort="name"):
+    if sort not in monitor.SORT_KEYS:
+        return print(f"\n{color(f'! Unknown sort: {sort}', Colors.RED)}  Use one of: {', '.join(monitor.SORT_KEYS)}\n")
     projects = docker_api.find_projects()
     if not projects:
         return print(no_projects_message())
-
-    print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color('  ·  Resource Monitor', Colors.DIM)}\n")
-
-    # Alternate screen buffer: same trick htop/less use. The live
-    # view repaints in place instead of spamming scrollback, and
-    # the terminal is restored to whatever it showed before on exit.
-    sys.stdout.write("\033[?1049h\033[H")
-    sys.stdout.write(color("  Loading…", Colors.DIM))
-    sys.stdout.flush()
-
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            while True:
-                # docker stats --no-stream alone costs the better
-                # part of a second (Docker needs two cgroup samples
-                # spaced apart to compute a CPU%), so it has to run
-                # alongside the per-project container lookups, not
-                # before them, or their costs just add up serially.
-                stats_future = executor.submit(docker_api.fetch_stats)
-                container_futures = [executor.submit(docker_api.get_containers_light, p) for p in projects]
-
-                metrics = get_system_metrics()
-                project_data = [{"project": p, "containers": f.result()} for p, f in zip(projects, container_futures)]
-                stats_map = stats_future.result()
-
-                frame = render_top_frame(project_data, stats_map, metrics)
-
-                # Move cursor home, draw the new frame, then clear
-                # anything left over from a longer previous frame.
-                sys.stdout.write("\033[H" + frame + "\033[J")
-                sys.stdout.flush()
-
-                time.sleep(1.5)
-    except KeyboardInterrupt:
-        # Ctrl+C is the normal, expected way to close a live monitor
-        # (same as htop/less) -- not an abort mid-action like it
-        # would be during upgrade/sweep. Handle it here so it exits
-        # quietly instead of falling through to main()'s red
-        # "Aborted by user" handler.
-        pass
-    finally:
-        sys.stdout.write("\033[?1049l")
-        sys.stdout.flush()
-
-    print(color("  Monitor stopped.", Colors.DIM) + "\n")
+    monitor.run(projects, sort)
 
 
 def check_image_with_version(image, allow_pull):

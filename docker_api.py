@@ -290,14 +290,38 @@ def fetch_stats():
         if len(parts) < 6:
             continue
         name, cpu, mem_usage, mem_pct, net, blk = parts[:6]
+        used, _, limit = mem_usage.partition(" / ")
         stats_map[name] = {
             "cpu": cpu,
-            "mem_used": mem_usage.split(" / ")[0],
+            "mem_used": used,
+            "mem_limit": limit,  # the container's limit, or the host's RAM when it has none
             "mem_pct": mem_pct,
             "net": net,
             "blk": blk,
         }
     return stats_map
+
+def network_owners():
+    """
+    {container name: name of the container whose network it shares} for
+    containers started with network_mode: container:X / service:X (e.g.
+    qBittorrent -> gluetun). Their network counters are the owner's.
+    """
+    success, ids, _ = run_command(["docker", "ps", "-q", "--no-trunc"])
+    if not success or not ids:
+        return {}
+    success, output, _ = run_command(["docker", "inspect", "--format", "{{.Id}}|{{.Name}}|{{.HostConfig.NetworkMode}}"] + ids.split())
+    if not success:
+        return {}
+    rows = [line.split("|", 2) for line in output.splitlines() if line.count("|") == 2]
+    name_by_id = {cid: name.lstrip("/") for cid, name, _ in rows}
+    owners = {}
+    for cid, name, mode in rows:
+        if mode.startswith("container:"):
+            target = mode.split(":", 1)[1]
+            owner = name_by_id.get(target) or next((n for i, n in name_by_id.items() if i.startswith(target)), target)
+            owners[name.lstrip("/")] = owner
+    return owners
 
 def get_local_image_id(image):
     succ, out, err = run_command(["docker", "image", "inspect", image, "--format", "{{.Id}}"])

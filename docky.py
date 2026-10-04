@@ -15,7 +15,7 @@ def show_usage():
         ("status", "Show Docker projects, containers, and system metrics"),
         ("projects", "List every project Docky found and where it lives"),
         ("urls [name] [--check]", "Show where each service is reachable; --check tests every URL"),
-        ("top", "Show real-time CPU and RAM usage mapped to your projects"),
+        ("top [--sort cpu|mem]", "Live CPU, memory, network and disk use per container"),
         ("updates", "Check for image updates, showing old → new version"),
         ("upgrade [name] [--dry-run]", "Pull and recreate outdated containers, listing version changes"),
         ("rollback [name] [service]", "Undo the last upgrade (no args: list saved snapshots)"),
@@ -70,7 +70,15 @@ def main():
             args = sys.argv[2:]
             target = next((a for a in args if not a.startswith("-")), None)
             commands.cmd_urls(target=target, check="--check" in args)
-        elif cmd == "top": commands.cmd_top()
+        elif cmd == "top":
+            args = sys.argv[2:]
+            sort = "name"
+            for i, a in enumerate(args):
+                if a.startswith("--sort="):
+                    sort = a.split("=", 1)[1]
+                elif a == "--sort":
+                    sort = args[i + 1] if i + 1 < len(args) else ""
+            commands.cmd_top(sort=sort.lower())
         elif cmd in ("updates", "update"): commands.cmd_updates(is_upgrade=False)
         elif cmd == "upgrade":
             args = sys.argv[2:]

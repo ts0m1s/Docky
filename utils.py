@@ -59,5 +59,7 @@ def get_system_metrics():
     return {
         "disk_str": f"{disk_used_gb:.1f}GB / {disk_total_gb:.1f}GB ({disk_pct:.1f}%)",
         "disk_pct": disk_pct,
-        "ram_str": f"{ram_used_gb:.1f}GB / {ram_total_gb:.1f}GB ({ram_pct:.1f}%)"
+        "ram_str": f"{ram_used_gb:.1f}GB / {ram_total_gb:.1f}GB ({ram_pct:.1f}%)",
+        "disk_used_gb": disk_used_gb, "disk_total_gb": disk_total_gb,
+        "ram_used_gb": ram_used_gb, "ram_total_gb": ram_total_gb, "ram_pct": ram_pct,
     }
