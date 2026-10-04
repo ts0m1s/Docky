@@ -1,13 +1,16 @@
 # docker_api.py
+import concurrent.futures
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from .utils import run_command
+from . import registry
 
 COMPOSE_FILENAMES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 DEFAULT_ROOT = Path.home() / "docker"
@@ -222,20 +225,25 @@ def get_project_containers(project):
     if not success:
         return []
 
-    containers = []
-    for line in output.splitlines():
-        parts = line.split("|")
-        if len(parts) < 4: continue
-        name, state, status, image = parts[0], parts[1], parts[2], parts[3]
+    rows = [line.split("|") for line in output.splitlines()]
+    rows = [parts for parts in rows if len(parts) >= 4]
 
+    # One `docker inspect` for the whole project, not one per container.
+    details = {}
+    if rows:
+        _, inspect_output, _ = run_command(["docker", "container", "inspect", *[parts[0] for parts in rows],
+                                            "--format", "{{.Name}}|{{.Image}}|{{.Config.Image}}|{{.HostConfig.NetworkMode}}"])
+        for line in inspect_output.splitlines():
+            if line.count("|") >= 3:
+                cname, running_id, config_image, network_mode = line.split("|", 3)
+                details[cname.lstrip("/")] = (running_id, config_image, network_mode)
+
+    containers = []
+    for parts in rows:
+        name, state, status, image = parts[0], parts[1], parts[2], parts[3]
         short_name = derive_short_name(name, project["name"])
         service = parts[4] if len(parts) >= 5 and parts[4] and "{{" not in parts[4] else short_name
-
-        inspect_success, inspect_output, _ = run_command(["docker", "container", "inspect", name, "--format", "{{.Image}}|{{.Config.Image}}|{{.HostConfig.NetworkMode}}"])
-        running_id, config_image, network_mode = "", image, ""
-        if inspect_success and inspect_output and inspect_output.count("|") >= 2:
-            running_id, config_image, network_mode = inspect_output.split("|", 2)
-
+        running_id, config_image, network_mode = details.get(name, ("", image, ""))
         containers.append({"name": name, "short_name": short_name, "state": state, "status": status, "image": config_image, "running_id": running_id, "service": service, "network_mode": network_mode})
     return containers
 
@@ -347,26 +355,30 @@ def check_image(image, allow_pull=True):
     local state -- pass allow_pull=False (dry runs) to report
     "unknown" instead of mutating anything.
     """
-    local_id, _ = get_local_image_id(image)
-    
-    succ, out, _ = run_command(["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"])
-    local_digest = None
-    if succ and out:
+    # One local inspect for both the image ID and every digest it's known by.
+    local_id, local_digests = None, set()
+    succ, out, _ = run_command(["docker", "image", "inspect", image, "--format", "{{.Id}}|{{json .RepoDigests}}"])
+    if succ and "|" in out:
+        local_id, _, digests_json = out.partition("|")
         try:
-            digests = json.loads(out)
-            if digests:
-                match = re.search(r"@sha256:([a-f0-9]{64})$", digests[0])
-                if match: local_digest = f"sha256:{match.group(1)}"
-        except json.JSONDecodeError: pass
+            local_digests = {d.split("@", 1)[1] for d in json.loads(digests_json) or [] if "@" in d}
+        except json.JSONDecodeError:
+            pass
+    local_digest = next(iter(sorted(local_digests)), None)
 
-    succ, out, _ = run_command(["docker", "buildx", "imagetools", "inspect", image])
     remote_digest = None
-    if succ:
-        for line in out.splitlines():
-            match = re.match(r"^Digest:\s+(sha256:[a-f0-9]{64})$", line.strip())
-            if match:
-                remote_digest = match.group(1)
-                break
+    try:  # fast path: one HEAD request straight to the registry
+        remote_digest = registry.remote_digest(image)
+    except registry.RegistryError:
+        succ, out, _ = run_command(["docker", "buildx", "imagetools", "inspect", image])
+        if succ:
+            for line in out.splitlines():
+                match = re.match(r"^Digest:\s+(sha256:[a-f0-9]{64})$", line.strip())
+                if match:
+                    remote_digest = match.group(1)
+                    break
+    if remote_digest in local_digests:
+        local_digest = remote_digest
 
     if not local_digest or not remote_digest:
         if not allow_pull:
@@ -464,14 +476,46 @@ def find_orphaned_containers(containers):
             orphans.append(c)
     return orphans
 
-def upgrade_service(project, service_name):
-    succ, _, err = run_command(compose_cmd(project, "pull", service_name))
-    if not succ: return False, f"pull failed: {err}"
-    succ, _, err = run_command(compose_cmd(project, "up", "-d", service_name))
-    if not succ: return False, f"up failed: {err}"
-    return True, ""
+def _per_service(project, services, *args):
+    """Run `compose <args> <service>` for each service in parallel: {service: (ok, error)}."""
+    def one(service):
+        succ, _, err = run_command(compose_cmd(project, *args, service))
+        return service, (succ, "" if succ else err)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(services))) as pool:
+        return dict(pool.map(one, services))
+
+def _all_or_each(project, services, *args):
+    """
+    One `compose <args> s1 s2 …` call -- Compose handles the services in
+    parallel. Only if that fails are they retried one by one, to find out
+    which service failed. Returns {service: (ok, error)}.
+    """
+    if not services:
+        return {}
+    succ, _, _ = run_command(compose_cmd(project, *args, *services))
+    if succ:
+        return {s: (True, "") for s in services}
+    return _per_service(project, services, *args)
+
+def pull_services(project, services):
+    """Download new images for these services, all at once."""
+    return {s: (ok, "" if ok else f"pull failed: {err}") for s, (ok, err) in _all_or_each(project, services, "pull", "--quiet").items()}
+
+def recreate_services(project, services):
+    """Recreate these services on their (already pulled) new images, all at once."""
+    return {s: (ok, "" if ok else f"up failed: {err}") for s, (ok, err) in _all_or_each(project, services, "up", "-d", "--pull", "never").items()}
+
+def recreate_followers(project, services):
+    """
+    Re-attach services that share another's network (qBittorrent behind
+    gluetun) to the container that was just replaced. --force-recreate:
+    a restart would keep the stale network reference.
+    """
+    results = _all_or_each(project, services, "up", "-d", "--no-deps", "--force-recreate", "--pull", "never")
+    return [(s, ok, "" if ok else f"up failed: {err}") for s, (ok, err) in results.items()]
 
 ROLLBACK_LABEL = "docky.rollback"
+_state_lock = threading.Lock()
 
 def rollback_state_path():
     base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
@@ -516,15 +560,16 @@ def snapshot_service(project, container):
     )
     labelled = result.returncode == 0
 
-    state = load_rollback_state()
-    state.setdefault(project["name"], {})[container["service"]] = {
-        "image": container["image"],
-        "tag": tag,
-        "previous_id": image_id,
-        "protected": labelled,
-        "saved_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    save_rollback_state(state)
+    with _state_lock:  # snapshots run in parallel; read-modify-write must not interleave
+        state = load_rollback_state()
+        state.setdefault(project["name"], {})[container["service"]] = {
+            "image": container["image"],
+            "tag": tag,
+            "previous_id": image_id,
+            "protected": labelled,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        save_rollback_state(state)
     return True
 
 def rollback_service(project, service, entry):
@@ -546,15 +591,16 @@ def rollback_service(project, service, entry):
     return True, ""
 
 def forget_snapshot(project_name, service):
-    state = load_rollback_state()
-    entry = state.get(project_name, {}).pop(service, None)
-    if not state.get(project_name, True):
-        state.pop(project_name, None)
-    save_rollback_state(state)
+    with _state_lock:
+        state = load_rollback_state()
+        entry = state.get(project_name, {}).pop(service, None)
+        if not state.get(project_name, True):
+            state.pop(project_name, None)
+        save_rollback_state(state)
     if entry:
         run_command(["docker", "rmi", entry["tag"]])
 
-def verify_container_health(container_name, healthcheck_timeout=30, no_healthcheck_grace=6, poll_interval=1.0):
+def verify_container_health(container_name, healthcheck_timeout=30, no_healthcheck_grace=6, poll_interval=0.5):
     """
     Confirm a container actually came back up cleanly after
     'up -d', rather than trusting the command's exit code alone --
