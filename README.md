@@ -121,8 +121,10 @@ Docky runs Compose with the same files the project was started with, so `docker-
 └─ ✓ radarr     up to date · 6.4.4.10685-ls318
 ```
 
-- **No pulling:** the registry's version is read without downloading the image (`docker buildx imagetools inspect`).
-- **Where the version comes from:** the `org.opencontainers.image.version` label, then linuxserver.io's `build_version`. Images that only say `latest`/`main` fall back to their build date.
+- **No pulling:** the registry's version is read without downloading the image, straight from the registry over HTTPS (or `docker buildx imagetools` for registries that need your credentials).
+- **Where the version comes from:** the `org.opencontainers.image.version` label, then linuxserver.io's `build_version`. For Docker Hub images whose labels only say `latest`/`main`, the version tag pointing at the same image (e.g. `latest` = `0.21.0`). Otherwise, the build date.
+- **Remembered:** a version found once is saved for that image digest (`~/.local/state/docky/remote-versions.json`), so later checks only ask whether the tag moved.
+- **Rate limits:** if Docker Hub's anonymous pull limit is used up, Docky reads versions from hub.docker.com instead, which isn't affected. `docker login` raises the limit, and Docky uses that login automatically. If a version truly can't be read, the row says why instead of showing `?`.
 - **The "from" side** is the image the container is actually running. A newer image that was pulled but never applied is reported as an update.
 - **Summary:** the run ends with the version changes and, when the image names its GitHub/GitLab/Codeberg source, a release-notes link.
 

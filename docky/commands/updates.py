@@ -17,7 +17,7 @@ def check_image_with_version(image, allow_pull):
     if res["status"] == "update":
         # A pull-based check already has the new image locally; otherwise
         # read the registry's config without pulling.
-        res["remote_info"] = versions.local_version(image) if res.get("checked_via") == "pull" else versions.remote_version(image)
+        res["remote_info"] = versions.local_version(image) if res.get("checked_via") == "pull" else versions.remote_version(image, res.get("remote"))
     return res
 
 def classify(container, res, local_infos):
@@ -29,7 +29,12 @@ def classify(container, res, local_infos):
         # Newer image already pulled, container not recreated yet.
         status = "update"
         target_info = local_infos.get(res["local_id"]) or versions.local_version(res["local_id"])
-    change = versions.describe_change(running_info, target_info) if status == "update" else None
+    change = None
+    if status == "update":
+        # The running image's labels may not say its version (an older
+        # release): a version tag that still points at it can.
+        running_info = versions.running_version(running_info, container["image"], (running_info or {}).get("digests"))
+        change = versions.describe_change(running_info, target_info)
     return status, running_info, target_info, change
 
 class Notes:
@@ -39,15 +44,16 @@ class Notes:
         self.clickable = supports_hyperlinks()
         self.deferred = []
 
-    def tail(self, used, change, url, name):
+    def tail(self, used, change, link, name):
         # Starts in the same column as "up to date" on ✓ rows; at least two
         # spaces before the link even when a change is longer than CHANGE_W.
-        text = f"{change or 'new image (no version info)':<{CHANGE_W}}  "
+        url, link_text = link or (None, None)
+        text = f"{change or 'newer image':<{CHANGE_W}}  "
         out = " " + color(text, Colors.DIM)
         used += 1 + len(text)
         if url:
             if self.clickable:
-                out += color(hyperlink(url, "release notes ↗"), Colors.DIM)
+                out += color(hyperlink(url, link_text), Colors.DIM)
             elif used + len(url) <= self.columns:
                 out += color(url, Colors.DIM)
             else:
@@ -148,8 +154,8 @@ def _show_checks(project_data, image_futures, local_future, is_upgrade):
             elif status == "update":
                 total_upd += 1
                 # ↑ already says "update available"; the row is just name, change, notes.
-                url = versions.release_notes_url(target_info or running_info)
-                print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<{name_w}}{notes.tail(len(prefix) + 2 + name_w, change, url, name)}\033[K")
+                link = versions.notes_link(target_info, running_info)
+                print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<{name_w}}{notes.tail(len(prefix) + 2 + name_w, change, link, name)}\033[K")
                 if is_upgrade:
                     if dependency_map is None:
                         dependency_map = docker_api.get_dependency_map(project)
@@ -219,9 +225,11 @@ def _upgrade_project(project, containers, items):
         else:
             ok, detail = health[c["name"]]
             installed = versions.local_version(c["image"]) or target_info  # what actually got installed
+            if target_info and target_info.get("version") and not installed.get("version"):
+                installed = dict(installed, version=target_info["version"])  # found via its version tag
             rows.append((c, ok, "upgraded & verified" if ok else "upgraded but unstable", detail,
                          versions.describe_change(running_info, installed),
-                         versions.release_notes_url(installed or running_info)))
+                         versions.notes_link(installed, running_info)))
     followers = []
     for f, ok, err in follower_results:
         if ok and f in by_service:
@@ -282,7 +290,7 @@ def _upgrade(project_data, image_futures, local_future):
                 failed.append((name, detail))
                 mark, colour = "✕", Colors.RED
             label_cell = f"{label:<22}"  # fixed width, so the versions line up across rows
-            tail = notes.tail(len(prefix) + 2 + name_w + 1 + len(label_cell), change, url, name) if change or url else ""
+            tail = notes.tail(len(prefix) + 2 + name_w + 1 + len(label_cell), change, url, name) if change or (url and url[0]) else ""
             print(f"{prefix}{color(mark, colour)} {name:<{name_w}} {color(label_cell, colour)}{tail}")
         for f_idx, (name, ok, err, parent) in enumerate(followers):
             prefix = f"{stem}{'└─' if len(rows) + f_idx == lines - 1 else '├─'} "
