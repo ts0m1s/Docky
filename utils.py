@@ -1,6 +1,8 @@
 # utils.py
+import os
 import subprocess
 import shutil
+import sys
 import platform
 
 class Colors:
@@ -14,6 +16,31 @@ class Colors:
 
 def color(text, colour):
     return f"{colour}{text}{Colors.RESET}"
+
+def supports_hyperlinks():
+    """
+    Whether the terminal shows OSC 8 links (clickable text). There's no way
+    to ask the terminal, so known ones are recognised by their environment;
+    anything else -- including tmux/screen, SSH sessions and pipes -- gets
+    plain URLs. DOCKY_LINKS=plain|clickable overrides the guess.
+    """
+    choice = os.environ.get("DOCKY_LINKS", "").lower()
+    if choice in ("plain", "clickable"):
+        return choice == "clickable"
+    if not sys.stdout.isatty() or os.environ.get("TMUX") or os.environ.get("STY"):
+        return False
+    env = os.environ
+    vte = env.get("VTE_VERSION", "")
+    return bool(
+        (vte.isdigit() and int(vte) >= 5000)  # GNOME Terminal, Ptyxis, Tilix, …
+        or env.get("TERM_PROGRAM") in ("iTerm.app", "WezTerm", "vscode", "ghostty")
+        or env.get("WT_SESSION") or env.get("KITTY_WINDOW_ID") or env.get("KONSOLE_VERSION")
+        or env.get("TERM") in ("xterm-kitty", "foot", "foot-extra", "xterm-ghostty")
+    )
+
+def hyperlink(url, text):
+    """Clickable `text` pointing at `url` (OSC 8)."""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
 
 def run_command(command):
     result = subprocess.run(command, capture_output=True, text=True)
