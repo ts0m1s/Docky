@@ -15,7 +15,7 @@ Python. `docky self-update` regenerates them.
 import os
 from pathlib import Path
 
-INSTALL_DIR = Path(__file__).resolve().parent
+INSTALL_DIR = Path(__file__).resolve().parent.parent  # the install folder (docky.py, VERSION, completions/), above the package
 COMPLETION_DIR = INSTALL_DIR / "completions"
 MARKER = "# Docky tab completion"
 

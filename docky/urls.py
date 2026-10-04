@@ -14,7 +14,7 @@ import socket
 import ssl
 import urllib.error
 import urllib.request
-from utils import run_command
+from .utils import run_command
 
 HTTPS_PORTS = {443, 8443, 9443}
 LOCAL_BINDS = {"127.0.0.1", "::1"}

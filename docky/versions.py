@@ -12,7 +12,7 @@ back to the build date, which still says how old each side is.
 import json
 import re
 from functools import lru_cache
-from utils import run_command
+from .utils import run_command
 
 VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version", "version")
 # Label values that name a channel, not a version.

@@ -7,7 +7,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from utils import run_command
+from .utils import run_command
 
 COMPOSE_FILENAMES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 DEFAULT_ROOT = Path.home() / "docker"

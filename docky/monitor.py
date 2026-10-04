@@ -14,8 +14,8 @@ import shutil
 import sys
 import time
 from datetime import datetime
-from utils import Colors, color, get_system_metrics, parse_pct
-import docker_api
+from .utils import Colors, color, get_system_metrics, parse_pct
+from . import docker_api
 
 INTERVAL = 2.0  # seconds between refreshes (docker stats itself takes ~1s)
 
