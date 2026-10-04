@@ -16,6 +16,7 @@ private images, odd auth, network trouble -- raises RegistryError, and
 the caller falls back to the docker CLI, which knows your credentials.
 """
 import base64
+import concurrent.futures
 import hashlib
 import http.client
 import json
@@ -235,6 +236,79 @@ def remote_config(image, platform):
         raise RegistryError("manifest has no config")
     _, body = _call(registry, repo, f"blobs/{config_digest}")
     return json.loads(body)
+
+def _version_key(tag):
+    """Sort key for version tags: v3.40.1 > v3.40.0 > v3.9.9."""
+    return [int(n) for n in re.findall(r"\d+", tag)]
+
+def _specificity(tag):
+    return (tag.count(".") + tag.count("-"), len(tag))
+
+def registry_version_tag(image, digest, candidates=12):
+    """
+    The version tag that points at the same image as `image` (e.g. latest ==
+    v1.40.0), using the registry's tag list plus HEAD requests -- neither is
+    counted as a pull. Checks the newest version-like tags, in parallel.
+    None if no version tag matches (a branch build).
+    """
+    registry, repo, tag = parse_reference(image)
+    tags, page = [], "tags/list?n=1000"
+    for _ in range(20):  # registries hand out tag lists in pages; follow them (up to 20,000 tags)
+        headers, body = _call(registry, repo, page)
+        try:
+            tags += json.loads(body).get("tags") or []
+        except ValueError:
+            raise RegistryError("tag list isn't JSON")
+        link = re.search(r'<[^>]*/tags/list\?([^>]*)>;\s*rel="next"', headers.get("Link", "") or "")
+        if not link:
+            break
+        page = f"tags/list?{link.group(1)}"
+    newest = sorted((t for t in tags if VERSION_TAG.match(t) and t != tag), key=_version_key, reverse=True)[:candidates]
+    if not newest:
+        return None
+    accept = ", ".join(INDEX_TYPES + MANIFEST_TYPES)
+
+    def digest_of(candidate):
+        try:
+            headers, _ = _call(registry, repo, f"manifests/{candidate}", "HEAD", accept)
+            return candidate, headers.get("Docker-Content-Digest")
+        except RegistryError:
+            return candidate, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(newest))) as pool:
+        matches = [t for t, d in pool.map(digest_of, newest) if d == digest]
+    return max(matches, key=_specificity) if matches else None
+
+def version_tag(image, digest):
+    """registry_version_tag, via hub.docker.com for Docker Hub images (its tag lists are huge)."""
+    if parse_reference(image)[0] == "registry-1.docker.io":
+        hub = docker_hub_tag(image)
+        return hub["version"] if hub["digest"] == digest else None
+    return registry_version_tag(image, digest)
+
+# --- GitHub: how far apart two builds are -------------------------------------
+
+def github_commits_between(source, base, head):
+    """
+    How many commits `head` is ahead of `base` in a GitHub repo, or None.
+    GitHub's public API allows 60 requests an hour without a login; callers
+    remember every answer, so each pair of builds is asked about only once.
+    """
+    match = re.match(r"https://github\.com/([^/]+)/([^/]+?)/?$", source or "")
+    if not match or not base or not head:
+        return None
+    url = f"https://api.github.com/repos/{match.group(1)}/{match.group(2)}/compare/{base}...{head}"
+    try:
+        status, _, body = _fetch(url, headers={"Accept": "application/vnd.github+json"})
+    except RegistryError:
+        return None
+    if status != 200:
+        return None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    return data.get("ahead_by") if data.get("status") in ("ahead", "identical") else None
 
 # --- Docker Hub's website API -----------------------------------------------
 # hub.docker.com is separate from the registry and its pull rate limit, so it
