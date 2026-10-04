@@ -162,14 +162,54 @@ def _download(repo, commit, dest):
         raise UpdateError("downloaded archive doesn't look like Docky")
     return roots[0]
 
+def _payload(source):
+    """
+    What gets installed: the .py files at the top of the repo, plus any
+    top-level Python package folders (ones with an __init__.py). Folders
+    are listed with a trailing "/" so VERSION records them as folders.
+    """
+    files = sorted(p.name for p in source.glob("*.py") if p.is_file())
+    packages = sorted(f"{p.name}/" for p in source.iterdir()
+                      if p.is_dir() and (p / "__init__.py").is_file())
+    return files + packages
+
 def _validate(source):
-    files = sorted(p.name for p in source.glob("*.py"))
-    for name in files:
-        try:
-            compile((source / name).read_text(encoding="utf-8"), name, "exec")
-        except (SyntaxError, ValueError, UnicodeDecodeError) as e:
-            raise UpdateError(f"new version doesn't compile ({name}): {e}")
-    return files
+    entries = _payload(source)
+    for entry in entries:
+        paths = sorted((source / entry).rglob("*.py")) if entry.endswith("/") else [source / entry]
+        for path in paths:
+            name = str(path.relative_to(source))
+            try:
+                compile(path.read_text(encoding="utf-8"), name, "exec")
+            except (SyntaxError, ValueError, UnicodeDecodeError) as e:
+                raise UpdateError(f"new version doesn't compile ({name}): {e}")
+    return entries
+
+def _swap_in(staging, entry):
+    """Move one staged file or folder into place."""
+    name = entry.rstrip("/")
+    new, dest = staging / name, INSTALL_DIR / name
+    if not entry.endswith("/"):
+        os.replace(new, dest)
+        return
+    # A folder can't be replaced in one rename: move the old one aside,
+    # move the new one in, and put the old one back if that fails.
+    aside = staging / f".old-{name}"
+    if dest.exists():
+        os.rename(dest, aside)
+    try:
+        os.rename(new, dest)
+    except OSError:
+        if aside.exists():
+            os.rename(aside, dest)
+        raise
+
+def _remove(entry):
+    path = INSTALL_DIR / entry.rstrip("/")
+    if entry.endswith("/"):
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
 
 def write_version(repo, ref, commit, date, files):
     tmp = VERSION_FILE.with_suffix(".tmp")
@@ -179,24 +219,32 @@ def write_version(repo, ref, commit, date, files):
 def install(repo, ref, target):
     """
     Replace the installed code with `target` (a latest() result).
-    The new files are downloaded and compiled in a temporary folder
-    first; only then is each file swapped in with an atomic rename, so a
-    failed download or a broken commit never leaves Docky half-updated.
+    The new files and package folders are downloaded and compiled in a
+    temporary folder first; only then is each swapped in (files with an
+    atomic rename, folders with two), so a failed download or a broken
+    commit never leaves Docky half-updated. Folders matter: older
+    versions of this function copied top-level .py files only, so they
+    can't install a release whose code lives in a package folder.
     """
     if not os.access(INSTALL_DIR, os.W_OK):
         raise UpdateError(f"no permission to write {INSTALL_DIR} (installed as root? run: sudo docky self-update)")
     with tempfile.TemporaryDirectory(prefix="docky-update-") as tmp:
         source = _download(repo, target["commit"], tmp)
-        files = _validate(source)
+        entries = _validate(source)
 
         staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=INSTALL_DIR))
         try:
-            for name in files:
-                shutil.copy2(source / name, staging / name)
+            for entry in entries:
+                name = entry.rstrip("/")
+                if entry.endswith("/"):
+                    shutil.copytree(source / name, staging / name,
+                                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                else:
+                    shutil.copy2(source / name, staging / name)
             swapped = 0
             try:
-                for name in files:
-                    os.replace(staging / name, INSTALL_DIR / name)
+                for entry in entries:
+                    _swap_in(staging, entry)
                     swapped += 1
             except OSError as e:
                 if swapped:
@@ -207,12 +255,13 @@ def install(repo, ref, target):
 
     (INSTALL_DIR / "docky.py").chmod(0o755)
     old = set((installed() or {}).get("files") or [])
-    for gone in old - set(files):
-        # Only files the previous version shipped; anything else is left alone.
-        (INSTALL_DIR / gone).unlink(missing_ok=True)
+    for gone in old - set(entries):
+        # Only what the previous version shipped (files or folders); anything
+        # else in the install folder -- e.g. completions/ -- is left alone.
+        _remove(gone)
     shutil.rmtree(INSTALL_DIR / "__pycache__", ignore_errors=True)
-    write_version(repo, ref, target["commit"], target["date"], files)
-    return files
+    write_version(repo, ref, target["commit"], target["date"], entries)
+    return entries
 
 # --- Daily "new version" notice ------------------------------------------
 

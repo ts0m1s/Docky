@@ -73,14 +73,39 @@ SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 
 say "Installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+# What's installed: the top-level .py files plus any Python package folders
+# (ones with an __init__.py). Same rule as `docky self-update`.
 FILES=""
 for path in "$SRC"/*.py; do
   f="$(basename "$path")"
   cp "$path" "$INSTALL_DIR/$f"
   FILES="$FILES${FILES:+, }\"$f\""
 done
+for dir in "$SRC"/*/; do
+  [ -f "$dir/__init__.py" ] || continue
+  d="$(basename "$dir")"
+  rm -rf "$INSTALL_DIR/$d"
+  cp -R "$dir" "$INSTALL_DIR/$d"
+  FILES="$FILES${FILES:+, }\"$d/\""
+done
 chmod +x "$INSTALL_DIR/docky.py"
-rm -rf "$INSTALL_DIR/__pycache__"
+# Installing over an older copy: remove what it shipped that this version
+# no longer does (e.g. modules that moved into a package folder).
+python3 - "$INSTALL_DIR" "[$FILES]" <<'PY' || true
+import json, os, shutil, sys
+install_dir, new = sys.argv[1], set(json.loads(sys.argv[2]))
+try:
+    old = json.load(open(os.path.join(install_dir, "VERSION"))).get("files") or []
+except (OSError, ValueError):
+    old = []
+for entry in set(old) - new:
+    path = os.path.join(install_dir, entry.rstrip("/"))
+    if entry.endswith("/"):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.isfile(path):
+        os.remove(path)
+PY
+find "$INSTALL_DIR" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 cat > "$INSTALL_DIR/VERSION" <<EOF
 {
   "repo": "$REPO",
@@ -92,7 +117,8 @@ cat > "$INSTALL_DIR/VERSION" <<EOF
 EOF
 ln -sf "$INSTALL_DIR/docky.py" "$BIN_DIR/docky"
 
-VERSION_NUMBER="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "$INSTALL_DIR/about.py" 2>/dev/null || true)"
+VERSION_NUMBER="$(python3 "$INSTALL_DIR/docky.py" --version 2>/dev/null | awk '{print $2}' || true)"
+case "$VERSION_NUMBER" in [0-9]*) ;; *) VERSION_NUMBER="" ;; esac
 say "Installed Docky${VERSION_NUMBER:+ $VERSION_NUMBER}: $BIN_DIR/docky"
 
 # Tab completion for zsh/bash (sourced from ~/.zshrc / ~/.bashrc;
