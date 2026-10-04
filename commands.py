@@ -6,7 +6,7 @@ import concurrent.futures
 import shlex
 import shutil
 from pathlib import Path
-from utils import Colors, color, run_command, get_system_metrics
+from utils import Colors, color, run_command, get_system_metrics, supports_hyperlinks, hyperlink
 import docker_api
 import monitor
 import urls as urls_api
@@ -279,8 +279,31 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
         total_cur, total_upd, total_upg, total_err, total_unk = 0, 0, 0, 0, 0
         errors = []
         unstable = []
-        changes = []  # (name, "from → to", release notes url)
+        deferred_notes = []  # (name, url) for links that didn't fit on their row
         dependency_maps = {}
+        columns = shutil.get_terminal_size((120, 40)).columns
+        links_clickable = supports_hyperlinks()
+        CHANGE_W = 40
+
+        def change_tail(used, change, notes, name):
+            """
+            '  old → new   release notes ↗' for an update row. The link is a
+            clickable 'release notes ↗' where the terminal supports it, else
+            the full URL if it fits; otherwise it's listed after the tree.
+            """
+            # Starts in the same column as "up to date" on ✓ rows; at least two
+            # spaces before the link even when a change is longer than CHANGE_W.
+            text = f"{change or 'new image (no version info)':<{CHANGE_W}}  "
+            tail = " " + color(text, Colors.DIM)
+            used += 1 + len(text)
+            if notes:
+                if links_clickable:
+                    tail += color(hyperlink(notes, "release notes ↗"), Colors.DIM)
+                elif used + len(notes) <= columns:
+                    tail += color(notes, Colors.DIM)
+                else:
+                    deferred_notes.append((name, notes))
+            return tail
 
         def dependency_map(project):
             if project["name"] not in dependency_maps:
@@ -314,7 +337,6 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                         status = "update"
                         target_info = versions.local_version(res["local_id"])
                 change = versions.describe_change(running_info, target_info) if status == "update" else None
-                change_text = f"  {color(change, Colors.DIM)}" if change else ""
 
                 if status == "current":
                     total_cur += 1
@@ -364,14 +386,15 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                             # What actually got installed, not what the check predicted.
                             installed = versions.local_version(container["image"]) or target_info
                             change = versions.describe_change(running_info, installed)
-                            change_text = f"  {color(change, Colors.DIM)}" if change else ""
-                            changes.append((name, change, versions.release_notes_url(installed or running_info)))
+                            notes = versions.release_notes_url(installed or running_info)
+                            label = "upgraded & verified" if ok else "upgraded but unstable"
+                            tail = change_tail(len(prefix) + 2 + name_w + 1 + len(label), change, notes, name)
                             if ok:
                                 total_upg += 1
-                                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<{name_w}} {color('upgraded & verified', Colors.GREEN)}{change_text}\033[K")
+                                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<{name_w}} {color(label, Colors.GREEN)}{tail}\033[K")
                             else:
                                 total_err += 1; unstable.append((name, detail, project["name"]))
-                                print(f"\r{prefix}{color('!', Colors.RED)} {name:<{name_w}} {color('upgraded but unstable', Colors.RED)}{change_text}\033[K")
+                                print(f"\r{prefix}{color('!', Colors.RED)} {name:<{name_w}} {color(label, Colors.RED)}{tail}\033[K")
 
                             guide = f"{'   ' if is_last_p else '│  '}{'   ' if is_last_c else '│  '}"
                             by_service = {c["service"]: c for c in containers}
@@ -387,9 +410,10 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                                     print(f"{guide}{color('↳', Colors.RED)} {dep_name:<18} {color('recreate failed (follows ' + name + ')', Colors.RED)}")
                     else:
                         total_upd += 1
-                        label = "would upgrade" if dry_run else "update available"
-                        changes.append((name, change, versions.release_notes_url(target_info or running_info)))
-                        print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<{name_w}} {color(label, Colors.YELLOW)}{change_text}\033[K")
+                        # ↑ already says "update available"; the row is just name, change, notes.
+                        notes = versions.release_notes_url(target_info or running_info)
+                        tail = change_tail(len(prefix) + 2 + name_w, change, notes, name)
+                        print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<{name_w}}{tail}\033[K")
                         if is_upgrade:
                             followers = docker_api.dependents_of(dependency_map(project), container["service"])
                             if followers:
@@ -408,29 +432,17 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
         if total_unk: print(color(f"? {total_unk} could not be verified without pulling", Colors.DIM))
         if total_err: print(color(f"! {total_err} error(s)", Colors.RED))
         
-        if changes:
-            heading = "Version changes:" if is_upgrade and not dry_run else "Available versions:"
-            print("\n" + color(heading, Colors.BOLD))
-            # One line per change, release notes on the same line; containers
-            # sharing the same change and notes (one app's several services)
-            # are listed together.
+        if deferred_notes:
+            # Only links that didn't fit on their row (terminals without
+            # clickable links); one line each, services of one app together.
             groups = {}
-            for item, change, notes in changes:
-                groups.setdefault((change, notes), []).append(item)
-            rows = [(", ".join(items), change or "version not published by the image", notes, bool(change))
-                    for (change, notes), items in groups.items()]
-            name_w = min(max(len(label) for label, _, _, _ in rows), 32) + 2
-            change_w = max(len(text) for _, text, _, _ in rows) + 2
-            columns = shutil.get_terminal_size((200, 40)).columns
-            for label, text, notes, known in rows:
-                text_cell = f"{text:<{change_w}}"
-                line = f"  {label:<{name_w}}{text_cell if known else color(text_cell, Colors.DIM)}"
-                if notes and 2 + name_w + change_w + len(notes) <= columns:
-                    print(line + color(notes, Colors.DIM))
-                else:  # wouldn't fit: link on its own line rather than a messy wrap
-                    print(line.rstrip())
-                    if notes:
-                        print(color(f"  {'':<{name_w}}{notes}", Colors.DIM))
+            for item, url in deferred_notes:
+                groups.setdefault(url, []).append(item)
+            rows = [(", ".join(items), url) for url, items in groups.items()]
+            label_w = min(max(len(label) for label, _ in rows), 32) + 2
+            print("\n" + color("Release notes:", Colors.BOLD))
+            for label, url in rows:
+                print(f"  {label:<{label_w}}{color(url, Colors.DIM)}")
 
         if errors:
             print("\n" + color("Check details:", Colors.BOLD))
