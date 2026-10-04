@@ -7,7 +7,10 @@ from ..utils import Colors, color, run_command
 from .. import docker_api
 from .common import get_spinner, no_projects_message, select_projects
 
+WORDS = {"start": ("starting", "started"), "stop": ("stopping", "stopped"), "restart": ("restarting", "restarted")}
+
 def cmd_lifecycle(action, target):
+    doing, done = WORDS[action]
     projects = docker_api.find_projects()
     if not projects: return print(no_projects_message())
     
@@ -21,7 +24,7 @@ def cmd_lifecycle(action, target):
         except EOFError: choice = 'n'
         if choice not in ['y', 'yes']: return print(f"\n{color('Aborted.', Colors.DIM)}\n")
 
-    print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color(f'  ·  {action.capitalize()}ing Projects', Colors.DIM)}\n")
+    print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color(f'  ·  {doing.capitalize()} Projects', Colors.DIM)}\n")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         # `compose start` only wakes existing containers. A project found on
@@ -37,13 +40,13 @@ def cmd_lifecycle(action, target):
             future = futures[p_idx]
             idx = 0
             while not future.done():
-                sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<20} {color(f'{action}ing...', Colors.YELLOW)}\033[K")
+                sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<20} {color(f'{doing}...', Colors.YELLOW)}\033[K")
                 sys.stdout.flush()
                 idx += 1; time.sleep(0.08)
             succ, _, err = future.result()
             if succ:
                 success_c += 1
-                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color(f'{action}ed', Colors.GREEN)}\033[K")
+                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color(done, Colors.GREEN)}\033[K")
             else:
                 error_c += 1
                 print(f"\r{prefix}{color('✕', Colors.RED)} {name:<20} {color(f'failed', Colors.RED)}\033[K\n  {color(err, Colors.DIM)}")
