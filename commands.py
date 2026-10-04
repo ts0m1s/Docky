@@ -4,6 +4,7 @@ import time
 import re
 import concurrent.futures
 import shlex
+import shutil
 from pathlib import Path
 from utils import Colors, color, run_command, get_system_metrics
 import docker_api
@@ -269,6 +270,8 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         project_data = [d for d in fetch_project_data(projects, executor) if d["containers"]]
         if not project_data: return
+        # Name column as wide as the longest name, so statuses line up.
+        name_w = max([len(c["short_name"]) for d in project_data for c in d["containers"]] + [12]) + 1
 
         unique_images = {c["image"] for d in project_data for c in d["containers"]}
         image_futures = {img: executor.submit(check_image_with_version, img, is_upgrade and not dry_run) for img in unique_images}
@@ -297,7 +300,7 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
 
                 idx = 0
                 while not future.done():
-                    sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<20} {color('checking...', Colors.DIM)}\033[K")
+                    sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<{name_w}} {color('checking...', Colors.DIM)}\033[K")
                     sys.stdout.flush()
                     idx += 1; time.sleep(0.08)
 
@@ -317,23 +320,23 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                     total_cur += 1
                     current = versions.describe_current(running_info)
                     detail = f"up to date · {current}" if current else "up to date"
-                    print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color(detail, Colors.DIM)}\033[K")
+                    print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<{name_w}} {color(detail, Colors.DIM)}\033[K")
                 elif status == "unknown":
                     total_unk += 1
-                    print(f"\r{prefix}{color('?', Colors.YELLOW)} {name:<20} {color('cannot verify without pulling', Colors.DIM)}\033[K")
+                    print(f"\r{prefix}{color('?', Colors.YELLOW)} {name:<{name_w}} {color('cannot verify without pulling', Colors.DIM)}\033[K")
                 elif status == "update":
                     if is_upgrade and not dry_run:
                         docker_api.snapshot_service(project, container)
                         upg_future = executor.submit(docker_api.upgrade_service, project, container["service"])
                         while not upg_future.done():
-                            sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<20} {color('pulling & recreating...', Colors.YELLOW)}\033[K")
+                            sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<{name_w}} {color('pulling & recreating...', Colors.YELLOW)}\033[K")
                             sys.stdout.flush()
                             idx += 1; time.sleep(0.08)
                         success, err_msg = upg_future.result()
 
                         if not success:
                             total_err += 1; errors.append((name, err_msg))
-                            print(f"\r{prefix}{color('!', Colors.RED)} {name:<20} {color('upgrade failed', Colors.RED)}\033[K")
+                            print(f"\r{prefix}{color('!', Colors.RED)} {name:<{name_w}} {color('upgrade failed', Colors.RED)}\033[K")
                         else:
                             # Anything sharing this service's network
                             # (e.g. qBittorrent behind gluetun) is now
@@ -343,7 +346,7 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                             if docker_api.dependents_of(dependency_map(project), container["service"]):
                                 follow_future = executor.submit(docker_api.recreate_dependents, project, container["service"], dependency_map(project))
                                 while not follow_future.done():
-                                    sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<20} {color('recreating dependents...', Colors.YELLOW)}\033[K")
+                                    sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<{name_w}} {color('recreating dependents...', Colors.YELLOW)}\033[K")
                                     sys.stdout.flush()
                                     idx += 1; time.sleep(0.08)
                                 follower_results = follow_future.result()
@@ -353,7 +356,7 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                             # confirm it before calling this a success.
                             verify_future = executor.submit(docker_api.verify_container_health, container["name"])
                             while not verify_future.done():
-                                sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<20} {color('verifying health...', Colors.CYAN)}\033[K")
+                                sys.stdout.write(f"\r{prefix}{color(get_spinner(idx), Colors.CYAN)} {name:<{name_w}} {color('verifying health...', Colors.CYAN)}\033[K")
                                 sys.stdout.flush()
                                 idx += 1; time.sleep(0.08)
                             ok, detail = verify_future.result()
@@ -365,10 +368,10 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                             changes.append((name, change, versions.release_notes_url(installed or running_info)))
                             if ok:
                                 total_upg += 1
-                                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<20} {color('upgraded & verified', Colors.GREEN)}{change_text}\033[K")
+                                print(f"\r{prefix}{color('✓', Colors.GREEN)} {name:<{name_w}} {color('upgraded & verified', Colors.GREEN)}{change_text}\033[K")
                             else:
                                 total_err += 1; unstable.append((name, detail, project["name"]))
-                                print(f"\r{prefix}{color('!', Colors.RED)} {name:<20} {color('upgraded but unstable', Colors.RED)}{change_text}\033[K")
+                                print(f"\r{prefix}{color('!', Colors.RED)} {name:<{name_w}} {color('upgraded but unstable', Colors.RED)}{change_text}\033[K")
 
                             guide = f"{'   ' if is_last_p else '│  '}{'   ' if is_last_c else '│  '}"
                             by_service = {c["service"]: c for c in containers}
@@ -386,7 +389,7 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                         total_upd += 1
                         label = "would upgrade" if dry_run else "update available"
                         changes.append((name, change, versions.release_notes_url(target_info or running_info)))
-                        print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<20} {color(label, Colors.YELLOW)}{change_text}\033[K")
+                        print(f"\r{prefix}{color('↑', Colors.YELLOW)} {name:<{name_w}} {color(label, Colors.YELLOW)}{change_text}\033[K")
                         if is_upgrade:
                             followers = docker_api.dependents_of(dependency_map(project), container["service"])
                             if followers:
@@ -394,7 +397,7 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
                                 print(f"{guide}{color('↳ would also recreate: ' + ', '.join(followers), Colors.DIM)}")
                 else:
                     total_err += 1; errors.append((container["image"], res["error"]))
-                    print(f"\r{prefix}{color('!', Colors.RED)} {name:<20} {color('check failed', Colors.RED)}\033[K")
+                    print(f"\r{prefix}{color('!', Colors.RED)} {name:<{name_w}} {color('check failed', Colors.RED)}\033[K")
 
         print("\n" + "─" * 55)
         print(color(f"✓ {total_cur} up to date", Colors.GREEN))
@@ -408,11 +411,26 @@ def cmd_updates(is_upgrade=False, target=None, dry_run=False):
         if changes:
             heading = "Version changes:" if is_upgrade and not dry_run else "Available versions:"
             print("\n" + color(heading, Colors.BOLD))
-            width = max(len(n) for n, _, _ in changes) + 2
+            # One line per change, release notes on the same line; containers
+            # sharing the same change and notes (one app's several services)
+            # are listed together.
+            groups = {}
             for item, change, notes in changes:
-                print(f"  {item:<{width}}{change or color('version not published by the image', Colors.DIM)}")
-                if notes:
-                    print(color(f"  {'':<{width}}release notes: {notes}", Colors.DIM))
+                groups.setdefault((change, notes), []).append(item)
+            rows = [(", ".join(items), change or "version not published by the image", notes, bool(change))
+                    for (change, notes), items in groups.items()]
+            name_w = min(max(len(label) for label, _, _, _ in rows), 32) + 2
+            change_w = max(len(text) for _, text, _, _ in rows) + 2
+            columns = shutil.get_terminal_size((200, 40)).columns
+            for label, text, notes, known in rows:
+                text_cell = f"{text:<{change_w}}"
+                line = f"  {label:<{name_w}}{text_cell if known else color(text_cell, Colors.DIM)}"
+                if notes and 2 + name_w + change_w + len(notes) <= columns:
+                    print(line + color(notes, Colors.DIM))
+                else:  # wouldn't fit: link on its own line rather than a messy wrap
+                    print(line.rstrip())
+                    if notes:
+                        print(color(f"  {'':<{name_w}}{notes}", Colors.DIM))
 
         if errors:
             print("\n" + color("Check details:", Colors.BOLD))
