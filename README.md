@@ -10,7 +10,21 @@ Zero dependencies: just Python 3.8+ and Docker.
 curl -fsSL https://raw.githubusercontent.com/ts0m1s/Docky/main/install.sh | sh
 ```
 
-This installs to `~/.local/share/docky` and links `~/.local/bin/docky`. To uninstall, delete those two paths.
+This installs to `~/.local/share/docky`, links `~/.local/bin/docky`, and sets up tab completion. To uninstall, delete those two paths and the two `# Docky tab completion` lines at the end of `~/.zshrc` / `~/.bashrc`.
+
+### Tab completion
+
+In zsh and bash, press <kbd>Tab</kbd> after `docky` to see every command with its description. It also completes what comes next:
+
+```
+❯ docky restart <Tab>          all  arr  gluetun  jellyfin  seerr  traefik  …
+❯ docky remove arr --<Tab>     --volumes  --images  --files  --all  --dry-run  --yes
+❯ docky rollback arr <Tab>     services with a saved snapshot
+```
+
+Project names are looked up live, so new stacks appear immediately. A folder path (`/`, `~`, `.`) completes as a path. The installer adds one line to the end of `~/.zshrc` (and `~/.bashrc` if you have one) that loads the script; `docky self-update` keeps the script current. Set `DOCKY_NO_MODIFY_PATH=1` before installing to get the line printed instead, or print the script yourself with `docky completion zsh` / `docky completion bash`.
+
+Mistyped commands get a suggestion: `! Unknown command: self-udpate  Did you mean docky self-update?`
 
 ## Updating Docky
 
