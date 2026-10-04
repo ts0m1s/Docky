@@ -11,7 +11,8 @@
 #   DOCKY_HOME     where the files go (default: ~/.local/share/docky)
 #   DOCKY_BIN_DIR  where the `docky` command is linked
 #                  (default: /usr/local/bin as root, otherwise ~/.local/bin)
-#   DOCKY_NO_MODIFY_PATH=1  don't edit your shell profile to add BIN_DIR to PATH
+#   DOCKY_NO_MODIFY_PATH=1  don't edit your shell profile (PATH, tab completion);
+#                           print the lines to add instead
 
 set -eu
 
@@ -93,6 +94,10 @@ ln -sf "$INSTALL_DIR/docky.py" "$BIN_DIR/docky"
 
 VERSION_NUMBER="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "$INSTALL_DIR/about.py" 2>/dev/null || true)"
 say "Installed Docky${VERSION_NUMBER:+ $VERSION_NUMBER}: $BIN_DIR/docky"
+
+# Tab completion for zsh/bash (sourced from ~/.zshrc / ~/.bashrc;
+# DOCKY_NO_MODIFY_PATH=1 prints the line to add instead).
+python3 "$INSTALL_DIR/docky.py" completion --install || warn "Couldn't set up tab completion; run 'docky completion --install' later."
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
