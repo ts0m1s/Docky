@@ -25,7 +25,7 @@ from pathlib import Path
 DEFAULT_REPO = "ts0m1s/Docky"
 DEFAULT_REF = "main"
 STABLE = "stable"  # special ref: follow the latest published release instead of a branch
-INSTALL_DIR = Path(__file__).resolve().parent
+INSTALL_DIR = Path(__file__).resolve().parent.parent  # the install folder (docky.py, VERSION, completions/), above the package
 VERSION_FILE = INSTALL_DIR / "VERSION"
 CHECK_INTERVAL = 24 * 3600
 
@@ -57,8 +57,8 @@ def is_git_checkout():
 def local_version():
     """The version number of the code that's running (about.__version__), or None."""
     try:
-        import about
-        return about.__version__
+        from . import __version__
+        return __version__
     except (ImportError, AttributeError):
         return None
 
@@ -88,13 +88,19 @@ def _get(url, timeout):
         raise UpdateError(f"can't reach GitHub ({getattr(e, 'reason', e)})")
 
 def remote_version(repo, commit, timeout=10):
-    """__version__ from about.py at that commit; None for commits from before versions existed."""
-    try:
-        source = _get(f"https://raw.githubusercontent.com/{repo}/{commit}/about.py", timeout).decode("utf-8", "replace")
-    except UpdateError:
-        return None
-    match = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", source, re.M)
-    return match.group(1) if match else None
+    """
+    __version__ at that commit: docky/__init__.py, or about.py for commits
+    from before the code moved into the package. None if neither has one.
+    """
+    for path in ("docky/__init__.py", "about.py"):
+        try:
+            source = _get(f"https://raw.githubusercontent.com/{repo}/{commit}/{path}", timeout).decode("utf-8", "replace")
+        except UpdateError:
+            continue
+        match = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", source, re.M)
+        if match:
+            return match.group(1)
+    return None
 
 def latest(repo, ref, timeout=10):
     """
@@ -355,7 +361,7 @@ def cmd_version():
         print(f"docky {version} (installed before self-update existed; reinstall once to enable it)")
 
 def cmd_self_update(check_only=False):
-    from utils import Colors, color
+    from .utils import Colors, color
     print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color('  ·  Self-update', Colors.DIM)}\n")
     if is_git_checkout():
         return print(color(f"  Docky is running from a git checkout ({INSTALL_DIR}). Update it with: git pull", Colors.YELLOW) + "\n")

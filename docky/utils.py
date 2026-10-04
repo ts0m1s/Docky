@@ -3,7 +3,6 @@ import os
 import subprocess
 import shutil
 import sys
-import platform
 
 class Colors:
     RESET = "\033[0m"

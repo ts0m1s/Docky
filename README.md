@@ -55,7 +55,7 @@ Docky has version numbers (`docky --version` → `docky 0.2.0 (a3b20d8, …)`), 
 
 ### Publishing a release (maintainers)
 
-1. In a PR, bump `__version__` in `about.py` (`0.2.0` → `0.3.0` for new features, `0.2.1` for fixes only), then merge it.
+1. In a PR, bump `__version__` in `docky/__init__.py` (`0.2.0` → `0.3.0` for new features, `0.2.1` for fixes only), then merge it.
 2. Tag the merge and push the tag:
 
    ```sh
@@ -63,7 +63,7 @@ Docky has version numbers (`docky --version` → `docky 0.2.0 (a3b20d8, …)`), 
    git tag v0.3.0 && git push origin v0.3.0
    ```
 
-3. The release workflow checks that every module compiles and the tag matches `about.py`, then publishes the release with notes generated from the merged PRs. Tag `v0.3.0-rc.1` to publish a pre-release for testing first.
+3. The release workflow checks that every module compiles and the tag matches `docky/__init__.py`, then publishes the release with notes generated from the merged PRs. Tag `v0.3.0-rc.1` to publish a pre-release for testing first.
 
 ## Usage
 
@@ -143,6 +143,27 @@ Safety rails:
 - The folder is never offered if it's your home folder, a `DOCKY_ROOT` scan folder, or contains another project.
 - If any file in the folder can't be deleted (for example data a container wrote as root), nothing in the folder is deleted, and Docky prints the `sudo rm -rf` command to finish.
 - Projects whose folder was already moved or deleted can still be removed by name.
+
+## Project layout
+
+```
+docky.py              the `docky` command: a small launcher for the package below
+docky/
+  __init__.py         version number
+  cli.py              argument handling, help, the command list (also drives tab completion)
+  commands/           one module per area: status, updates, cleanup, lifecycle, remove
+  docker_api.py       everything that talks to Docker / Compose
+  monitor.py          the live `docky top` view
+  urls.py             where services are reachable (`docky urls`)
+  versions.py         image versions for `docky updates`
+  completion.py       zsh / bash tab completion
+  selfupdate.py       `docky self-update` and the daily new-version notice
+  utils.py            colours, shell commands, terminal helpers
+install.sh            the installer
+.github/workflows/    the release workflow
+```
+
+Run it from a checkout with `python3 docky.py <command>`; no install needed.
 
 ## License
 
