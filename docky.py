@@ -15,7 +15,7 @@ COMMANDS = [
     ("status", "Show Docker projects, containers, and system metrics"),
     ("projects", "List every project Docky found and where it lives"),
     ("urls [name] [--check]", "Show where each service is reachable; --check tests every URL"),
-    ("top", "Show real-time CPU and RAM usage mapped to your projects"),
+    ("top [--sort cpu|mem]", "Live CPU, memory, network and disk use per container"),
     ("updates", "Check for image updates, showing old → new version"),
     ("upgrade [name] [--dry-run]", "Pull and recreate outdated containers, listing version changes"),
     ("rollback [name] [service]", "Undo the last upgrade (no args: list saved snapshots)"),
@@ -35,6 +35,7 @@ COMMANDS = [
 # What tab completion offers after each command.
 COMPLETION_SPEC = {
     "urls": {"args": [completion.PROJECTS], "flags": ["--check"]},
+    "top": {"flags": ["--sort=cpu", "--sort=mem"]},
     "upgrade": {"args": [completion.PROJECTS], "flags": ["--dry-run"]},
     "rollback": {"args": [completion.PROJECTS, completion.SERVICES]},
     "remove": {"args": [completion.PROJECTS], "flags": ["--volumes", "--images", "--files", "--all", "--dry-run", "--yes"]},
@@ -58,25 +59,9 @@ def show_usage(full=False):
     print(f"\n{color('● DOCKY', Colors.BOLD + Colors.CYAN)} {color(selfupdate.local_version() or '', Colors.DIM)}\n{color('Docker Server Manager', Colors.DIM)}\n")
     print(color("Usage:", Colors.BOLD) + "\n  docky <command> [target]\n")
     print(color("Commands:", Colors.BOLD))
-    cmds = [
-        ("status", "Show Docker projects, containers, and system metrics"),
-        ("projects", "List every project Docky found and where it lives"),
-        ("urls [name] [--check]", "Show where each service is reachable; --check tests every URL"),
-        ("top [--sort cpu|mem]", "Live CPU, memory, network and disk use per container"),
-        ("updates", "Check for image updates, showing old → new version"),
-        ("upgrade [name] [--dry-run]", "Pull and recreate outdated containers, listing version changes"),
-        ("rollback [name] [service]", "Undo the last upgrade (no args: list saved snapshots)"),
-        ("sweep", "Find and safely clear ghost data & unused images"),
-        ("orphans", "Find volumes belonging to deleted or renamed projects"),
-        ("remove <name> [options]", "Remove a project: plan first, then containers & networks, optionally"),
-        ("", "  --volumes, --images, --files (or --all); --dry-run, -y to skip prompts"),
-        ("start <name|all>", "Start a specific project or 'all'"),
-        ("stop <name|all>", "Stop a specific project or 'all'"),
-        ("restart <name|all>", "Restart a specific project or 'all'"),
-        ("self-update [--check]", "Update Docky itself to the latest version"),
-        ("--version", "Show the installed Docky version"),
-    ]
-    for cmd, desc in cmds:
+    for cmd, desc in COMMANDS:
+        if cmd == "help":
+            continue
         print(f"  {color(f'{cmd:<28}', Colors.CYAN)} {desc}")
     if not full:
         print(f"\n{color('Run', Colors.DIM)} docky --help {color('for how projects are found, updates, tab completion and settings.', Colors.DIM)}\n")
